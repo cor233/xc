@@ -52,10 +52,10 @@ class DownloaderApp:
         
         right_frame = tk.Frame(main_frame)
         right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5,0))
-        tk.Label(right_frame, text="章节列表", font=('Arial', 12, 'bold')).pack(anchor=tk.W)
+        tk.Label(right_frame, text="章节列表（按住 Ctrl 多选）", font=('Arial', 12, 'bold')).pack(anchor=tk.W)
         scrollbar = tk.Scrollbar(right_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.chapter_listbox = tk.Listbox(right_frame, yscrollcommand=scrollbar.set)
+        self.chapter_listbox = tk.Listbox(right_frame, yscrollcommand=scrollbar.set, selectmode=tk.EXTENDED)
         self.chapter_listbox.pack(fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.chapter_listbox.yview)
         
@@ -166,64 +166,70 @@ class DownloaderApp:
         self.status_var.set(f"共 {len(self.chapters)} 章")
     
     def start_download(self):
-        selection = self.chapter_listbox.curselection()
-        if not selection:
-            messagebox.showwarning("提示", "请选择要下载的章节")
+        selected = self.chapter_listbox.curselection()
+        if not selected:
+            messagebox.showwarning("提示", "请至少选择一个章节")
             return
-        idx = selection[0]
-        chapter_title, chapter_url = self.chapters[idx]
         if not self.download_path:
             messagebox.showwarning("提示", "请先选择下载位置")
             return
-        self.status_var.set(f"正在解析音频链接: {chapter_title}")
         self.download_btn.config(state=tk.DISABLED)
-        threading.Thread(target=self.download_chapter, args=(chapter_title, chapter_url), daemon=True).start()
+        threading.Thread(target=self.download_selected, args=(selected,), daemon=True).start()
+    
+    def download_selected(self, indices):
+        success = []
+        failed = []
+        total = len(indices)
+        for i, idx in enumerate(indices):
+            title, url = self.chapters[idx]
+            self.root.after(0, lambda t=title: self.status_var.set(f"正在下载 ({i+1}/{total}): {t}"))
+            try:
+                self.download_single_chapter(title, url)
+                success.append(title)
+            except Exception as e:
+                failed.append((title, str(e)))
+        self.root.after(0, lambda: self.download_finished(success, failed))
+        self.root.after(0, lambda: self.download_btn.config(state=tk.NORMAL))
+    
+    def download_single_chapter(self, title, url):
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.encoding = 'utf-8'
+        match = re.search(r'url:\s*[\'"]([^\'"]+\.m4a[^\'"]*)[\'"]', resp.text)
+        if not match:
+            match = re.search(r'url:\s*[\'"]([^\'"]+\.mp3[^\'"]*)[\'"]', resp.text)
+        if not match:
+            raise Exception("未找到音频链接")
+        audio_url = match.group(1)
+        if audio_url.startswith('//'):
+            audio_url = 'https:' + audio_url
+        elif not audio_url.startswith('http'):
+            audio_url = urllib.parse.urljoin(self.base_url, audio_url)
         
-    def download_chapter(self, title, url):
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            resp = requests.get(url, headers=headers, timeout=10)
-            resp.encoding = 'utf-8'
-            match = re.search(r'url:\s*[\'"]([^\'"]+\.m4a[^\'"]*)[\'"]', resp.text)
-            if not match:
-                match = re.search(r'url:\s*[\'"]([^\'"]+\.mp3[^\'"]*)[\'"]', resp.text)
-            if not match:
-                self.root.after(0, lambda: messagebox.showerror("错误", "未找到音频链接"))
-                self.root.after(0, lambda: self.status_var.set("下载失败"))
-                self.root.after(0, lambda: self.download_btn.config(state=tk.NORMAL))
-                return
-            audio_url = match.group(1)
-            if audio_url.startswith('//'):
-                audio_url = 'https:' + audio_url
-            elif not audio_url.startswith('http'):
-                audio_url = urllib.parse.urljoin(self.base_url, audio_url)
-            
-            ext = os.path.splitext(audio_url.split('?')[0])[1] or '.m4a'
-            filename = f"{title}{ext}"
-            invalid_chars = '<>:"/\\|?*'
-            for ch in invalid_chars:
-                filename = filename.replace(ch, '_')
-            filepath = os.path.join(self.download_path, filename)
-            
-            audio_resp = requests.get(audio_url, headers=headers, stream=True)
-            audio_resp.raise_for_status()
-            total_size = int(audio_resp.headers.get('content-length', 0))
-            downloaded = 0
-            with open(filepath, 'wb') as f:
-                for chunk in audio_resp.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size:
-                            percent = downloaded / total_size * 100
-                            self.root.after(0, lambda p=percent: self.status_var.set(f"下载中: {p:.1f}%"))
-            self.root.after(0, lambda: messagebox.showinfo("完成", f"下载完成: {filename}"))
-            self.root.after(0, lambda: self.status_var.set("下载完成"))
-        except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("错误", f"下载失败: {str(e)}"))
-            self.root.after(0, lambda: self.status_var.set("下载失败"))
-        finally:
-            self.root.after(0, lambda: self.download_btn.config(state=tk.NORMAL))
+        ext = os.path.splitext(audio_url.split('?')[0])[1] or '.m4a'
+        filename = f"{title}{ext}"
+        invalid_chars = '<>:"/\\|?*'
+        for ch in invalid_chars:
+            filename = filename.replace(ch, '_')
+        filepath = os.path.join(self.download_path, filename)
+        
+        audio_resp = requests.get(audio_url, headers=headers, stream=True)
+        audio_resp.raise_for_status()
+        with open(filepath, 'wb') as f:
+            for chunk in audio_resp.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+    
+    def download_finished(self, success, failed):
+        msg = f"下载完成：成功 {len(success)} 章"
+        if failed:
+            msg += f"，失败 {len(failed)} 章"
+            for title, reason in failed:
+                msg += f"\n{title}: {reason}"
+        else:
+            msg += "，全部成功！"
+        messagebox.showinfo("下载结果", msg)
+        self.status_var.set("就绪")
 
 def main():
     root = tk.Tk()

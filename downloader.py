@@ -7,6 +7,7 @@ import os
 import urllib.parse
 import re
 import sys
+import subprocess
 
 class DownloaderApp:
     def __init__(self, root):
@@ -18,6 +19,7 @@ class DownloaderApp:
         self.current_book_url = ""
         self.chapters = []
         self.search_results = []
+        self.current_save_dir = ""
         
         self.create_widgets()
         
@@ -52,9 +54,12 @@ class DownloaderApp:
         scrollbar.config(command=self.chapter_listbox.yview)
         
         download_frame = tk.Frame(self.root)
-        download_frame.pack(pady=10)
+        download_frame.pack(pady=5)
         self.download_btn = tk.Button(download_frame, text="下载选中章节", command=self.start_download, state=tk.DISABLED)
-        self.download_btn.pack()
+        self.download_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.open_folder_btn = tk.Button(download_frame, text="打开下载文件夹", command=self.open_folder, state=tk.DISABLED)
+        self.open_folder_btn.pack(side=tk.LEFT, padx=5)
         
         self.status_var = tk.StringVar()
         self.status_var.set("就绪")
@@ -69,6 +74,7 @@ class DownloaderApp:
         self.result_listbox.delete(0, tk.END)
         self.chapter_listbox.delete(0, tk.END)
         self.download_btn.config(state=tk.DISABLED)
+        self.open_folder_btn.config(state=tk.DISABLED)
         self.status_var.set("搜索中...")
         threading.Thread(target=self.search, args=(query,), daemon=True).start()
         
@@ -122,6 +128,7 @@ class DownloaderApp:
         self.current_book_url = url
         self.chapter_listbox.delete(0, tk.END)
         self.download_btn.config(state=tk.DISABLED)
+        self.open_folder_btn.config(state=tk.DISABLED)
         self.status_var.set("加载章节...")
         threading.Thread(target=self.load_chapters, args=(url,), daemon=True).start()
         
@@ -166,8 +173,10 @@ class DownloaderApp:
         folder_name = self.sanitize_filename(self.current_book_title)
         save_dir = os.path.join(base_dir, folder_name)
         os.makedirs(save_dir, exist_ok=True)
+        self.current_save_dir = save_dir
         
         self.download_btn.config(state=tk.DISABLED)
+        self.open_folder_btn.config(state=tk.DISABLED)
         threading.Thread(target=self.download_selected, args=(selected, save_dir), daemon=True).start()
     
     def get_base_directory(self):
@@ -196,6 +205,7 @@ class DownloaderApp:
                 failed.append((title, str(e)))
         self.root.after(0, lambda: self.download_finished(success, failed, save_dir))
         self.root.after(0, lambda: self.download_btn.config(state=tk.NORMAL))
+        self.root.after(0, lambda: self.open_folder_btn.config(state=tk.NORMAL))
     
     def download_single_chapter(self, title, url, save_dir):
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -236,7 +246,18 @@ class DownloaderApp:
         else:
             msg += "，全部成功！"
         messagebox.showinfo("下载结果", msg)
-        self.status_var.set("就绪")
+        self.status_var.set(f"已保存至：{save_dir}")
+    
+    def open_folder(self):
+        if self.current_save_dir and os.path.exists(self.current_save_dir):
+            if sys.platform == 'win32':
+                os.startfile(self.current_save_dir)
+            elif sys.platform == 'darwin':
+                subprocess.run(['open', self.current_save_dir])
+            else:
+                subprocess.run(['xdg-open', self.current_save_dir])
+        else:
+            messagebox.showerror("错误", "文件夹不存在或未下载任何内容")
 
 def main():
     root = tk.Tk()

@@ -502,6 +502,7 @@ class DownloaderGUI:
         
         self.downloader = None
         self.current_books = []
+        self.current_hot_books = []
         
         self.setup_ui()
         
@@ -606,8 +607,6 @@ class DownloaderGUI:
         
         ttk.Button(btn_frame2, text="下载选中书籍", 
                   command=lambda: self.download_selected(self.hot_tree)).pack(side=LEFT, padx=5)
-        
-        self.load_hot_books()
     
     def setup_settings_tab(self, parent):
         frame = ttk.Frame(parent)
@@ -632,9 +631,11 @@ class DownloaderGUI:
         ttk.Button(frame, text="保存设置", command=self.save_settings).grid(row=4, column=0, columnspan=2, pady=20)
     
     def log(self, message):
-        self.log_text.insert(END, f"[{time.strftime('%H:%M:%S')}] {message}\n")
-        self.log_text.see(END)
-        self.root.update()
+        if hasattr(self, 'log_text'):
+            self.log_text.insert(END, f"[{time.strftime('%H:%M:%S')}] {message}\n")
+            self.log_text.see(END)
+            self.root.update()
+        print(f"[{time.strftime('%H:%M:%S')}] {message}")
     
     def save_settings(self):
         try:
@@ -698,6 +699,8 @@ class DownloaderGUI:
         for item in self.hot_tree.get_children():
             self.hot_tree.delete(item)
         
+        self.current_hot_books = books
+        
         for i, book in enumerate(books, 1):
             self.hot_tree.insert('', 'end', values=(i, book['title'], book['author']))
         
@@ -722,9 +725,9 @@ class DownloaderGUI:
                 return
             book = self.current_books[index]
         else:
-            book = self.current_hot_books[index] if hasattr(self, 'current_hot_books') else None
-            if not book:
+            if index >= len(self.current_hot_books):
                 return
+            book = self.current_hot_books[index]
         
         result = messagebox.askyesno("确认", f"确定要下载《{book['title']}》吗？")
         if not result:

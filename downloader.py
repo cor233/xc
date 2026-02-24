@@ -1,4 +1,17 @@
 import os
+import sys
+import subprocess
+
+def ensure_playwright():
+    try:
+        import playwright
+    except ImportError:
+        print("正在安装 playwright...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
+        subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
+
+ensure_playwright()
+
 import re
 import json
 import time
@@ -19,14 +32,14 @@ class DownloaderGUI:
         self.base_url = "https://m.i275.com"
         self.output_dir = "downloads"
         os.makedirs(self.output_dir, exist_ok=True)
-        self.create_widgets()
         self.playwright = None
         self.browser = None
         self.context = None
         self.page = None
         self.download_queue = []
         self.is_downloading = False
-        self.init_browser()
+        self.create_widgets()
+        self.root.after(100, self.init_browser)
 
     def init_browser(self):
         try:
@@ -106,7 +119,7 @@ class DownloaderGUI:
         self.log_area = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, height=8)
         self.log_area.pack(fill=tk.BOTH, expand=True)
 
-    def log(self, msg, level="info"):
+    def log(self, msg):
         timestamp = time.strftime("%H:%M:%S")
         self.log_area.insert(tk.END, f"[{timestamp}] {msg}\n")
         self.log_area.see(tk.END)
@@ -114,11 +127,6 @@ class DownloaderGUI:
 
     def clear_list(self):
         self.book_listbox.delete(0, tk.END)
-
-    def add_book_to_list(self, title, url, author=""):
-        display = f"{title} - {author}"
-        self.book_listbox.insert(tk.END, display)
-        self.book_listbox.see(tk.END)
 
     def search_books(self):
         keyword = self.keyword_entry.get().strip()
@@ -132,7 +140,7 @@ class DownloaderGUI:
         self.log(f"开始搜索: {keyword}")
         try:
             if not self.page:
-                self.log("浏览器未初始化", "error")
+                self.log("浏览器未初始化")
                 return
             search_url = f"{self.base_url}/search.php?q={keyword}"
             self.page.goto(search_url, timeout=30000)
@@ -149,23 +157,20 @@ class DownloaderGUI:
                 author_match = re.search(r'<span[^>]*class="bg-gray-100[^"]*"[^>]*>演播</span>\s*([^<]+)', html)
                 if author_match:
                     author = author_match.group(1).strip()
-                else:
-                    author_match = re.search(r'<span[^>]*class="bg-gray-100[^"]*"[^>]*>作者</span>\s*([^<]+)', html)
-                    if author_match:
-                        author = author_match.group(1).strip()
                 books.append((title, url, author))
             if books:
+                with open("temp_books.json", "w") as f:
+                    json.dump([{"title": t, "url": u, "author": a} for t,u,a in books], f)
                 self.root.after(0, lambda: self._update_book_list(books))
                 self.log(f"找到 {len(books)} 本书")
             else:
-                self.log("未找到相关书籍", "warning")
+                self.log("未找到相关书籍")
         except Exception as e:
-            self.log(f"搜索出错: {e}", "error")
+            self.log(f"搜索出错: {e}")
 
     def _update_book_list(self, books):
         for title, url, author in books:
             self.book_listbox.insert(tk.END, f"{title} - {author}")
-            self.book_listbox.see(tk.END)
 
     def get_hot_books(self):
         self.clear_list()
@@ -191,31 +196,26 @@ class DownloaderGUI:
                 url = urljoin(self.base_url, href)
                 books.append((title, url, author))
             if books:
+                with open("temp_books.json", "w") as f:
+                    json.dump([{"title": t, "url": u, "author": a} for t,u,a in books[:20]], f)
                 self.root.after(0, lambda: self._update_book_list(books[:20]))
                 self.log(f"获取 {len(books[:20])} 本热门书籍")
-            else:
-                self.log("未获取到热门书籍", "warning")
         except Exception as e:
-            self.log(f"获取热门出错: {e}", "error")
+            self.log(f"获取热门出错: {e}")
 
     def on_book_select(self, event):
         selection = self.book_listbox.curselection()
         if not selection:
             return
         index = selection[0]
-        text = self.book_listbox.get(index)
-        url = None
         try:
             with open("temp_books.json", "r") as f:
                 books = json.load(f)
                 if index < len(books):
                     url = books[index]["url"]
+                    threading.Thread(target=self._fetch_detail, args=(url,), daemon=True).start()
         except:
             pass
-        if not url:
-            self.log("无法获取书籍详情", "warning")
-            return
-        threading.Thread(target=self._fetch_detail, args=(url,), daemon=True).start()
 
     def _fetch_detail(self, url):
         try:
@@ -242,11 +242,11 @@ class DownloaderGUI:
                 chapters.append({"num": int(num), "title": chap_title, "url": chap_url})
             chapters.sort(key=lambda x: x["num"])
             info = {"title": title, "author": author, "url": url, "chapters": chapters}
-            with open("temp_books.json", "w") as f:
-                json.dump([info], f)
+            with open("temp_book_detail.json", "w") as f:
+                json.dump(info, f)
             self.root.after(0, lambda: self._show_detail(info))
         except Exception as e:
-            self.log(f"获取详情出错: {e}", "error")
+            self.log(f"获取详情出错: {e}")
 
     def _show_detail(self, info):
         self.detail_text.delete(1.0, tk.END)
@@ -255,17 +255,11 @@ class DownloaderGUI:
         self.detail_text.insert(tk.END, f"章节: {len(info['chapters'])}\n\n")
         for ch in info['chapters'][:10]:
             self.detail_text.insert(tk.END, f"{ch['num']}. {ch['title']}\n")
-        if len(info['chapters']) > 10:
-            self.detail_text.insert(tk.END, "...")
 
     def start_download(self):
         try:
-            with open("temp_books.json", "r") as f:
-                books = json.load(f)
-                if not books:
-                    messagebox.showwarning("提示", "请先选择一本书")
-                    return
-                book_info = books[0]
+            with open("temp_book_detail.json", "r") as f:
+                book_info = json.load(f)
         except:
             messagebox.showwarning("提示", "请先选择一本书")
             return
@@ -290,29 +284,16 @@ class DownloaderGUI:
         self.progress['maximum'] = total
         success = 0
         failed = 0
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {}
-            for ch in chapters:
-                if not self.is_downloading:
-                    break
-                future = executor.submit(self.download_one, ch, book_dir)
-                futures[future] = ch
-            for future in as_completed(futures):
-                if not self.is_downloading:
-                    break
-                ch = futures[future]
-                try:
-                    if future.result():
-                        success += 1
-                        self.log(f"章节 {ch['num']} 完成")
-                    else:
-                        failed += 1
-                except Exception as e:
-                    failed += 1
-                    self.log(f"章节 {ch['num']} 失败: {e}", "error")
-                self.progress['value'] = success + failed
-                self.root.update_idletasks()
-                time.sleep(1)
+        for ch in chapters:
+            if not self.is_downloading:
+                break
+            if self.download_one(ch, book_dir):
+                success += 1
+                self.log(f"章节 {ch['num']} 完成")
+            else:
+                failed += 1
+            self.progress['value'] = success + failed
+            self.root.update_idletasks()
         self.is_downloading = False
         self.root.after(0, self._download_finished, success, failed)
 
@@ -328,43 +309,35 @@ class DownloaderGUI:
         try:
             self.page.goto(url, timeout=30000)
             self.page.wait_for_load_state("networkidle")
-            audio_url = None
-            scripts = self.page.query_selector_all('script')
-            for script in scripts:
-                content = script.inner_html()
-                if content and 'audio' in content and 'url' in content:
-                    match = re.search(r'url:\s*[\'"]([^\'"]+\.m4a[^\'"]*)[\'"]', content)
-                    if match:
-                        audio_url = match.group(1)
-                        break
+            audio_url = self.page.evaluate('''() => {
+                const scripts = document.querySelectorAll('script');
+                for (let script of scripts) {
+                    if (script.innerHTML && script.innerHTML.includes('audio')) {
+                        const match = script.innerHTML.match(/url:\\s*[\\'"]([^\\'"]+\\.m4a[^\\'"]*)[\\'"]/);
+                        if (match) return match[1];
+                    }
+                }
+                const audio = document.querySelector('audio');
+                return audio ? audio.src : null;
+            }''')
             if not audio_url:
-                audio_url = self.page.evaluate('''() => {
-                    const audio = document.querySelector('audio');
-                    return audio ? audio.src : null;
-                }''')
-            if not audio_url:
-                self.log(f"章节 {num} 未找到音频地址", "error")
+                self.log(f"章节 {num} 未找到音频地址")
                 return False
             if audio_url.startswith('//'):
                 audio_url = 'https:' + audio_url
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Referer': self.base_url,
-                'Origin': self.base_url,
-                'Accept': 'audio/webm,audio/ogg,audio/*'
+                'Referer': self.base_url
             }
             resp = requests.get(audio_url, headers=headers, stream=True, timeout=30)
             resp.raise_for_status()
-            total = int(resp.headers.get('content-length', 0))
             with open(filepath, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
             return True
         except Exception as e:
-            self.log(f"下载章节 {num} 异常: {e}", "error")
-            if os.path.exists(filepath):
-                os.remove(filepath)
+            self.log(f"下载章节 {num} 异常: {e}")
             return False
 
     def _download_finished(self, success, failed):

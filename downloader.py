@@ -1,11 +1,12 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, messagebox
 import threading
 import requests
 from bs4 import BeautifulSoup
 import os
 import urllib.parse
 import re
+import sys
 
 class DownloaderApp:
     def __init__(self, root):
@@ -13,7 +14,7 @@ class DownloaderApp:
         self.root.title("275听书下载器")
         self.root.geometry("800x600")
         self.base_url = "https://m.i275.com"
-        self.download_path = ""
+        self.current_book_title = ""
         self.current_book_url = ""
         self.chapters = []
         self.search_results = []
@@ -30,15 +31,6 @@ class DownloaderApp:
         self.search_entry.pack(side=tk.LEFT, padx=5)
         self.search_btn = tk.Button(search_frame, text="搜索", command=self.start_search)
         self.search_btn.pack(side=tk.LEFT)
-        
-        path_frame = tk.Frame(self.root)
-        path_frame.pack(pady=5, fill=tk.X, padx=10)
-        tk.Label(path_frame, text="下载位置:").pack(side=tk.LEFT)
-        self.path_var = tk.StringVar()
-        self.path_entry = tk.Entry(path_frame, textvariable=self.path_var, width=50)
-        self.path_entry.pack(side=tk.LEFT, padx=5)
-        self.browse_btn = tk.Button(path_frame, text="浏览", command=self.select_path)
-        self.browse_btn.pack(side=tk.LEFT)
         
         main_frame = tk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -69,12 +61,6 @@ class DownloaderApp:
         status_bar = tk.Label(self.root, textvariable=self.status_var, bd=1, relief=tk.SUNKEN, anchor=tk.W)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         
-    def select_path(self):
-        path = filedialog.askdirectory()
-        if path:
-            self.path_var.set(path)
-            self.download_path = path
-            
     def start_search(self):
         query = self.search_var.get().strip()
         if not query:
@@ -131,7 +117,8 @@ class DownloaderApp:
         if not selection:
             return
         idx = selection[0]
-        _, _, _, url = self.search_results[idx]
+        title, _, _, url = self.search_results[idx]
+        self.current_book_title = title
         self.current_book_url = url
         self.chapter_listbox.delete(0, tk.END)
         self.download_btn.config(state=tk.DISABLED)
@@ -170,28 +157,47 @@ class DownloaderApp:
         if not selected:
             messagebox.showwarning("提示", "请至少选择一个章节")
             return
-        if not self.download_path:
-            messagebox.showwarning("提示", "请先选择下载位置")
+        if not self.current_book_title:
+            messagebox.showerror("错误", "未选中任何书籍")
             return
+        
+        # 创建以书籍名称命名的文件夹（位于程序所在目录）
+        base_dir = self.get_base_directory()
+        folder_name = self.sanitize_filename(self.current_book_title)
+        save_dir = os.path.join(base_dir, folder_name)
+        os.makedirs(save_dir, exist_ok=True)
+        
         self.download_btn.config(state=tk.DISABLED)
-        threading.Thread(target=self.download_selected, args=(selected,), daemon=True).start()
+        threading.Thread(target=self.download_selected, args=(selected, save_dir), daemon=True).start()
     
-    def download_selected(self, indices):
+    def get_base_directory(self):
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        else:
+            return os.getcwd()
+    
+    def sanitize_filename(self, name):
+        invalid_chars = '<>:"/\\|?*'
+        for ch in invalid_chars:
+            name = name.replace(ch, '_')
+        return name.strip()
+    
+    def download_selected(self, indices, save_dir):
         success = []
         failed = []
         total = len(indices)
         for i, idx in enumerate(indices):
             title, url = self.chapters[idx]
-            self.root.after(0, lambda t=title: self.status_var.set(f"正在下载 ({i+1}/{total}): {t}"))
+            self.root.after(0, lambda t=title, c=i+1: self.status_var.set(f"正在下载 ({c}/{total}): {t}"))
             try:
-                self.download_single_chapter(title, url)
-                success.append(title)
+                filepath = self.download_single_chapter(title, url, save_dir)
+                success.append((title, filepath))
             except Exception as e:
                 failed.append((title, str(e)))
-        self.root.after(0, lambda: self.download_finished(success, failed))
+        self.root.after(0, lambda: self.download_finished(success, failed, save_dir))
         self.root.after(0, lambda: self.download_btn.config(state=tk.NORMAL))
     
-    def download_single_chapter(self, title, url):
+    def download_single_chapter(self, title, url, save_dir):
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(url, headers=headers, timeout=10)
         resp.encoding = 'utf-8'
@@ -208,10 +214,8 @@ class DownloaderApp:
         
         ext = os.path.splitext(audio_url.split('?')[0])[1] or '.m4a'
         filename = f"{title}{ext}"
-        invalid_chars = '<>:"/\\|?*'
-        for ch in invalid_chars:
-            filename = filename.replace(ch, '_')
-        filepath = os.path.join(self.download_path, filename)
+        filename = self.sanitize_filename(filename)
+        filepath = os.path.join(save_dir, filename)
         
         audio_resp = requests.get(audio_url, headers=headers, stream=True)
         audio_resp.raise_for_status()
@@ -219,13 +223,16 @@ class DownloaderApp:
             for chunk in audio_resp.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
+        return filepath
     
-    def download_finished(self, success, failed):
+    def download_finished(self, success, failed, save_dir):
         msg = f"下载完成：成功 {len(success)} 章"
+        if success:
+            msg += f"\n保存文件夹：{save_dir}"
         if failed:
-            msg += f"，失败 {len(failed)} 章"
+            msg += f"\n失败 {len(failed)} 章："
             for title, reason in failed:
-                msg += f"\n{title}: {reason}"
+                msg += f"\n  {title}: {reason}"
         else:
             msg += "，全部成功！"
         messagebox.showinfo("下载结果", msg)

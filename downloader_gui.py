@@ -318,7 +318,7 @@ class DownloaderApp(Tk):
     def __init__(self):
         super().__init__()
         self.title("有声小说搜索下载器")
-        self.geometry("950x750")
+        self.geometry("950x800")
         self.resizable(True, True)
         self.search_var = StringVar()
         self.max_workers_var = IntVar(value=2)
@@ -333,6 +333,8 @@ class DownloaderApp(Tk):
         self.worker_thread = None
         self.worker = None
         self.running = False
+        self.auto_mode = False
+        self.auto_thread = None
         self.create_widgets()
         self.update_log()
 
@@ -402,12 +404,12 @@ class DownloaderApp(Tk):
 
         ctrl_frame = Frame(main_frame)
         ctrl_frame.pack(fill=X, pady=5)
-        self.start_btn = Button(ctrl_frame, text="开始下载选中书籍", command=self.start_download, bg="green", fg="white", width=20)
+        self.start_btn = Button(ctrl_frame, text="开始下载", command=self.start_or_resume, bg="green", fg="white", width=12)
         self.start_btn.pack(side=LEFT, padx=2)
+        self.auto_btn = Button(ctrl_frame, text="自动下载", command=self.start_auto, bg="purple", fg="white", width=12)
+        self.auto_btn.pack(side=LEFT, padx=2)
         self.pause_btn = Button(ctrl_frame, text="暂停", command=self.pause_download, bg="orange", fg="white", width=8, state=DISABLED)
         self.pause_btn.pack(side=LEFT, padx=2)
-        self.resume_btn = Button(ctrl_frame, text="继续", command=self.resume_download, bg="blue", fg="white", width=8, state=DISABLED)
-        self.resume_btn.pack(side=LEFT, padx=2)
         self.stop_btn = Button(ctrl_frame, text="停止", command=self.stop_download, state=DISABLED, bg="red", fg="white", width=8)
         self.stop_btn.pack(side=LEFT, padx=2)
 
@@ -480,9 +482,12 @@ class DownloaderApp(Tk):
             self.selected_book_title = self.tree.item(item, 'tags')[1]
             self.log(f"已选中：{self.selected_book_title}")
 
-    def start_download(self):
+    def start_or_resume(self):
         if self.running:
-            messagebox.showwarning("提示", "已有任务在运行")
+            if self.worker and self.worker.pause_flag:
+                self.resume_download()
+            else:
+                messagebox.showwarning("提示", "下载正在进行中")
             return
         if not self.selected_book_url:
             messagebox.showerror("错误", "请先在搜索结果中选择一本小说")
@@ -503,36 +508,94 @@ class DownloaderApp(Tk):
         )
         self.running = True
         self.start_btn.config(state=DISABLED)
+        self.auto_btn.config(state=DISABLED)
         self.pause_btn.config(state=NORMAL)
-        self.resume_btn.config(state=DISABLED)
         self.stop_btn.config(state=NORMAL)
         self.fail_text.delete(1.0, END)
         self.worker_thread = threading.Thread(target=self.worker.start_download, args=(book_dir,))
         self.worker_thread.daemon = True
         self.worker_thread.start()
 
+    def start_auto(self):
+        if self.running:
+            if self.worker and self.worker.pause_flag:
+                self.resume_download()
+                return
+            else:
+                messagebox.showwarning("提示", "已有任务在运行")
+                return
+        if not self.selected_book_url:
+            messagebox.showerror("错误", "请先在搜索结果中选择一本小说")
+            return
+        self.auto_mode = True
+        self.running = True
+        self.start_btn.config(state=DISABLED)
+        self.auto_btn.config(state=DISABLED)
+        self.pause_btn.config(state=NORMAL)
+        self.stop_btn.config(state=NORMAL)
+        self.fail_text.delete(1.0, END)
+        self.auto_thread = threading.Thread(target=self.auto_loop)
+        self.auto_thread.daemon = True
+        self.auto_thread.start()
+
+    def auto_loop(self):
+        while self.auto_mode and not self.worker or (self.worker and not self.worker.stop_flag):
+            save_dir = self.save_path_var.get().strip()
+            if not save_dir:
+                save_dir = os.getcwd()
+            book_dir = os.path.join(save_dir, self.selected_book_title)
+            self.worker = DownloadWorker(
+                album_url=self.selected_book_url,
+                max_workers=self.max_workers_var.get(),
+                request_delay=(self.delay_min_var.get(), self.delay_max_var.get()),
+                retry_times=self.retry_var.get(),
+                timeout=self.timeout_var.get(),
+                save_dir=book_dir,
+                log_queue=self.log_queue
+            )
+            self.worker_thread = threading.Thread(target=self.worker.start_download, args=(book_dir,))
+            self.worker_thread.daemon = True
+            self.worker_thread.start()
+            self.worker_thread.join()
+            if not self.auto_mode or self.worker.stop_flag:
+                break
+            if not self.worker.failed_chapters:
+                self.log("自动下载：所有章节已完成")
+                break
+            self.log(f"自动下载：还有 {len(self.worker.failed_chapters)} 章失败，继续重试")
+            time.sleep(2)
+        self.auto_mode = False
+        self.running = False
+        self.start_btn.config(state=NORMAL)
+        self.auto_btn.config(state=NORMAL)
+        self.pause_btn.config(state=DISABLED)
+        self.stop_btn.config(state=DISABLED)
+
     def pause_download(self):
         if self.worker:
             self.worker.pause()
             self.pause_btn.config(state=DISABLED)
-            self.resume_btn.config(state=NORMAL)
+            self.start_btn.config(state=NORMAL)
+            self.auto_btn.config(state=NORMAL)
             self.log("下载已暂停")
 
     def resume_download(self):
         if self.worker:
             self.worker.resume()
             self.pause_btn.config(state=NORMAL)
-            self.resume_btn.config(state=DISABLED)
+            self.start_btn.config(state=DISABLED)
+            self.auto_btn.config(state=DISABLED)
             self.log("下载已继续")
 
     def stop_download(self):
         if self.worker:
             self.worker.stop_flag = True
             self.worker.resume()
+        self.auto_mode = False
         self.running = False
         self.start_btn.config(state=NORMAL)
+        self.auto_btn.config(state=NORMAL)
         self.pause_btn.config(state=DISABLED)
-        self.resume_btn.config(state=DISABLED)
         self.stop_btn.config(state=DISABLED)
         self.log("用户请求停止...")
 
@@ -565,11 +628,11 @@ class DownloaderApp(Tk):
             except queue.Empty:
                 break
         if self.worker_thread and not self.worker_thread.is_alive():
-            if self.running:
+            if self.running and not self.auto_mode:
                 self.running = False
                 self.start_btn.config(state=NORMAL)
+                self.auto_btn.config(state=NORMAL)
                 self.pause_btn.config(state=DISABLED)
-                self.resume_btn.config(state=DISABLED)
                 self.stop_btn.config(state=DISABLED)
                 self.log("下载线程已结束")
         self.after(100, self.update_log)

@@ -88,6 +88,10 @@ class DownloadWorker:
         if not resp:
             return []
         soup = BeautifulSoup(resp.text, 'html.parser')
+        # 检查是否真的是专辑详情页
+        if not soup.find('a', href=re.compile(r'^/play/\d+/\d+\.html')):
+            self.log("错误：当前页面没有找到任何章节链接，可能不是专辑详情页")
+            return []
         chapter_links = []
         for a in soup.find_all('a', href=re.compile(r'^/play/\d+/\d+\.html')):
             href = a.get('href')
@@ -208,12 +212,18 @@ class DownloadWorker:
             self.log("未找到任何章节，请检查URL或网络。")
             return
         self.log(f"共找到 {len(chapters)} 个章节")
+        if len(chapters) > 500:
+            self.log(f"警告：章节数量异常（{len(chapters)}），可能解析错误，请确认URL是否正确")
+        self.log("开始提交下载任务...")
         success_count = 0
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_chap = {
-                executor.submit(self.process_chapter, chap, download_dir, success_callback, fail_callback): chap
-                for chap in chapters
-            }
+            future_to_chap = {}
+            for chap in chapters:
+                if self.stop_flag:
+                    break
+                future = executor.submit(self.process_chapter, chap, download_dir, success_callback, fail_callback)
+                future_to_chap[future] = chap
+            self.log(f"已提交 {len(future_to_chap)} 个任务")
             for future in as_completed(future_to_chap):
                 if self.stop_flag:
                     executor.shutdown(wait=False)

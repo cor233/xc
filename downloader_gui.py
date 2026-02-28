@@ -317,7 +317,7 @@ class DownloadWorker:
 class DownloaderApp(Tk):
     def __init__(self):
         super().__init__()
-        self.title("有声小说搜索下载器")
+        self.title("i275有声书下载器")
         self.geometry("950x800")
         self.resizable(True, True)
         self.search_var = StringVar()

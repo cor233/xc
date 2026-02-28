@@ -5,8 +5,7 @@ import random
 import threading
 import queue
 from tkinter import *
-from tkinter import scrolledtext, messagebox, filedialog
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from tkinter import scrolledtext, messagebox, filedialog, ttk
 import requests
 from bs4 import BeautifulSoup
 
@@ -53,7 +52,6 @@ class DownloadWorker:
                 return None
             try:
                 proxy = self.get_random_proxy()
-                # 设置 Referer
                 headers = {}
                 if referer:
                     headers['Referer'] = referer
@@ -119,13 +117,11 @@ class DownloadWorker:
         if not resp:
             return None
         text = resp.text
-        # 检查页面标题，确认是播放页
         soup = BeautifulSoup(text, 'html.parser')
         title_tag = soup.find('title')
         page_title = title_tag.get_text() if title_tag else ""
         if "正在播放" not in page_title and "贺岁剧" not in page_title:
             self.log(f"警告：可能不是播放页，标题为：{page_title[:50]}")
-            # 继续尝试提取，可能标题不标准
         patterns = [
             r"url:\s*'([^']+)'",
             r'"url"\s*:\s*"([^"]+)"',
@@ -161,32 +157,45 @@ class DownloadWorker:
             self.log(f"下载异常: {e}")
             return False
 
-    def process_chapter(self, chapter, download_dir):
+    def process_chapter(self, chapter, download_dir, success_callback, fail_callback):
         chap_num = chapter['num']
         chap_title = chapter['title']
         play_url = chapter['url']
         self.log(f"[{chap_num}] 开始处理：{chap_title}")
         time.sleep(random.uniform(*self.request_delay))
-        audio_url = self.get_audio_url(play_url)
+        audio_url = None
+        fails = 0
+        while fails < 3:
+            if self.stop_flag:
+                return False
+            audio_url = self.get_audio_url(play_url)
+            if audio_url:
+                break
+            fails += 1
+            self.log(f"[{chap_num}] 获取音频URL失败（第{fails}次）")
+            time.sleep(random.uniform(*self.request_delay) * 2)
         if not audio_url:
-            self.log(f"[{chap_num}] 获取音频URL失败，跳过")
+            self.log(f"[{chap_num}] 连续3次失败，等待手动处理")
+            fail_callback(chapter)
             return False
         safe_title = re.sub(r'[\\/*?:"<>|]', '_', chap_title)
         filename = f"{chap_num:03d}_{safe_title}.m4a"
         filepath = os.path.join(download_dir, filename)
         if os.path.exists(filepath):
             self.log(f"[{chap_num}] 文件已存在，跳过")
+            success_callback(chapter)
             return True
         success = self.download_audio(audio_url, filepath)
         if success:
             self.log(f"[{chap_num}] 下载完成 -> {filename}")
+            success_callback(chapter)
         else:
             self.log(f"[{chap_num}] 下载失败")
+            fail_callback(chapter)
         return success
 
-    def start_download(self, download_dir):
+    def start_download(self, download_dir, success_callback, fail_callback):
         self.log("开始获取专辑信息...")
-        # 先访问一次首页，获取可能的 Cookie
         self.fetch_url("https://m.i275.com/", referer="https://m.i275.com/")
         album_title = self.get_album_title()
         if not download_dir:
@@ -202,7 +211,7 @@ class DownloadWorker:
         success_count = 0
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_chap = {
-                executor.submit(self.process_chapter, chap, download_dir): chap
+                executor.submit(self.process_chapter, chap, download_dir, success_callback, fail_callback): chap
                 for chap in chapters
             }
             for future in as_completed(future_to_chap):
@@ -223,25 +232,41 @@ class DownloaderApp(Tk):
     def __init__(self):
         super().__init__()
         self.title("有声小说批量下载工具")
-        self.geometry("900x650")
+        self.geometry("1200x800")
         self.resizable(True, True)
-        self.url_var = StringVar(value="https://m.i275.com/book/39161.html")
+        self.url_var = StringVar()
         self.max_workers_var = IntVar(value=5)
         self.delay_min_var = DoubleVar(value=0.5)
         self.delay_max_var = DoubleVar(value=1.5)
         self.retry_var = IntVar(value=3)
         self.timeout_var = IntVar(value=15)
         self.save_path_var = StringVar()
+        self.search_keyword_var = StringVar()
+        self.search_results = []
         self.log_queue = queue.Queue()
         self.worker_thread = None
         self.worker = None
         self.running = False
+        self.failed_chapters = []
+        self.success_chapters = []
         self.create_widgets()
         self.update_log()
 
     def create_widgets(self):
         main_frame = Frame(self, padx=10, pady=10)
         main_frame.pack(fill=BOTH, expand=True)
+
+        search_frame = LabelFrame(main_frame, text="搜索专辑", padx=5, pady=5)
+        search_frame.pack(fill=X, pady=5)
+        search_row = Frame(search_frame)
+        search_row.pack(fill=X, pady=2)
+        Label(search_row, text="关键词：").pack(side=LEFT)
+        Entry(search_row, textvariable=self.search_keyword_var, width=40).pack(side=LEFT, padx=5)
+        Button(search_row, text="搜索", command=self.search_album).pack(side=LEFT, padx=5)
+        self.result_listbox = Listbox(search_frame, height=4)
+        self.result_listbox.pack(fill=X, pady=5)
+        self.result_listbox.bind('<Double-Button-1>', self.on_result_select)
+        Button(search_frame, text="使用选中的专辑", command=self.use_selected_album).pack()
 
         url_frame = Frame(main_frame)
         url_frame.pack(fill=X, pady=5)
@@ -280,9 +305,24 @@ class DownloaderApp(Tk):
         self.stop_btn = Button(ctrl_frame, text="停止", command=self.stop_download, state=DISABLED, bg="red", fg="white", width=8)
         self.stop_btn.pack(side=LEFT, padx=5)
 
+        preview_frame = LabelFrame(main_frame, text="下载预览")
+        preview_frame.pack(fill=BOTH, expand=True, pady=5)
+
+        left_frame = Frame(preview_frame)
+        left_frame.pack(side=LEFT, fill=BOTH, expand=True, padx=5)
+        Label(left_frame, text="成功章节", font=('Arial', 10, 'bold')).pack(anchor=W)
+        self.success_listbox = Listbox(left_frame, height=10)
+        self.success_listbox.pack(fill=BOTH, expand=True)
+
+        right_frame = Frame(preview_frame)
+        right_frame.pack(side=RIGHT, fill=BOTH, expand=True, padx=5)
+        Label(right_frame, text="失败章节（连续3次）", font=('Arial', 10, 'bold')).pack(anchor=W)
+        self.fail_listbox = Listbox(right_frame, height=10)
+        self.fail_listbox.pack(fill=BOTH, expand=True)
+
         log_frame = LabelFrame(main_frame, text="下载日志")
         log_frame.pack(fill=BOTH, expand=True, pady=5)
-        self.log_text = scrolledtext.ScrolledText(log_frame, wrap=WORD, height=15)
+        self.log_text = scrolledtext.ScrolledText(log_frame, wrap=WORD, height=8)
         self.log_text.pack(fill=BOTH, expand=True)
 
     def select_save_dir(self):
@@ -305,6 +345,83 @@ class DownloaderApp(Tk):
                         self.log("代理格式错误，已忽略：" + line)
         return proxy_list
 
+    def search_album(self):
+        keyword = self.search_keyword_var.get().strip()
+        if not keyword:
+            messagebox.showwarning("提示", "请输入关键词")
+            return
+        search_url = f"https://m.i275.com/search.php?q={requests.utils.quote(keyword)}"
+        try:
+            resp = requests.get(search_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            resp.encoding = 'utf-8'
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            items = []
+            for a in soup.find_all('a', href=re.compile(r'^/book/\d+\.html')):
+                href = a.get('href')
+                full_url = requests.compat.urljoin("https://m.i275.com", href)
+                title = a.get_text(strip=True)
+                parent = a.find_parent('div', class_=re.compile('book-item|result-item'))
+                if parent:
+                    desc = parent.get_text(' ', strip=True)
+                else:
+                    desc = title
+                items.append((full_url, desc))
+            if not items:
+                self.log("未搜索到结果")
+                return
+            self.search_results = items
+            self.result_listbox.delete(0, END)
+            for url, desc in items:
+                self.result_listbox.insert(END, desc[:60])
+        except Exception as e:
+            messagebox.showerror("搜索失败", str(e))
+
+    def on_result_select(self, event):
+        self.use_selected_album()
+
+    def use_selected_album(self):
+        sel = self.result_listbox.curselection()
+        if not sel:
+            return
+        index = sel[0]
+        url, desc = self.search_results[index]
+        self.url_var.set(url)
+
+    def success_callback(self, chapter):
+        self.success_chapters.append(chapter)
+        self.after(0, self.update_success_listbox)
+
+    def fail_callback(self, chapter):
+        self.failed_chapters.append(chapter)
+        self.after(0, self.update_fail_listbox)
+        if len(self.failed_chapters) == 1:
+            self.after(500, self.prompt_retry)
+
+    def update_success_listbox(self):
+        self.success_listbox.delete(0, END)
+        for chap in self.success_chapters[-50:]:
+            self.success_listbox.insert(END, f"{chap['num']}: {chap['title'][:40]}")
+
+    def update_fail_listbox(self):
+        self.fail_listbox.delete(0, END)
+        for chap in self.failed_chapters:
+            self.fail_listbox.insert(END, f"{chap['num']}: {chap['title'][:40]}")
+
+    def prompt_retry(self):
+        if not self.failed_chapters:
+            return
+        msg = f"有 {len(self.failed_chapters)} 个章节连续3次获取失败。\n是否重试所有失败章节？"
+        ret = messagebox.askyesno("手动重试", msg)
+        if ret:
+            self.log("用户选择重试失败章节")
+            to_retry = self.failed_chapters.copy()
+            self.failed_chapters.clear()
+            self.update_fail_listbox()
+            for chap in to_retry:
+                self.worker.process_chapter(chap, self.save_path_var.get().strip() or os.getcwd(), self.success_callback, self.fail_callback)
+        else:
+            self.log("用户跳过失败章节")
+
     def start_download(self):
         if self.running:
             messagebox.showwarning("提示", "已有任务在运行")
@@ -315,6 +432,10 @@ class DownloaderApp(Tk):
             return
         save_dir = self.save_path_var.get().strip()
         proxy_list = self.parse_proxy()
+        self.success_chapters.clear()
+        self.failed_chapters.clear()
+        self.update_success_listbox()
+        self.update_fail_listbox()
         self.worker = DownloadWorker(
             album_url=url,
             max_workers=self.max_workers_var.get(),
@@ -327,7 +448,7 @@ class DownloaderApp(Tk):
         self.running = True
         self.start_btn.config(state=DISABLED)
         self.stop_btn.config(state=NORMAL)
-        self.worker_thread = threading.Thread(target=self.worker.start_download, args=(save_dir,))
+        self.worker_thread = threading.Thread(target=self.worker.start_download, args=(save_dir, self.success_callback, self.fail_callback))
         self.worker_thread.daemon = True
         self.worker_thread.start()
 

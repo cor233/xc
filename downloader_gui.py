@@ -32,6 +32,7 @@ class DownloadWorker:
             "Sec-Fetch-Site": "same-origin",
             "Sec-Fetch-User": "?1",
             "Cache-Control": "max-age=0",
+            "Referer": self.album_url,
         }
 
     def log(self, msg):
@@ -52,7 +53,11 @@ class DownloadWorker:
                 return None
             try:
                 proxy = self.get_random_proxy()
-                resp = requests.get(url, headers=headers or self.headers, proxies=proxy, timeout=timeout)
+                # 动态设置 Referer
+                if headers is None:
+                    headers = self.headers.copy()
+                    headers['Referer'] = self.album_url
+                resp = requests.get(url, headers=headers, proxies=proxy, timeout=timeout)
                 resp.encoding = 'utf-8'
                 if resp.status_code == 200:
                     return resp
@@ -87,15 +92,20 @@ class DownloadWorker:
         for a in soup.find_all('a', href=re.compile(r'^/play/\d+/\d+\.html')):
             href = a.get('href')
             full_url = requests.compat.urljoin(self.album_url, href)
-            parent = a.find_parent(attrs={'id': re.compile(r'chapter-pos-\d+')})
+            # 从 a 标签的 id 获取序号（如 chapter-pos-25）
             chap_num = 0
-            if parent:
-                pid = parent.get('id')
-                match = re.search(r'chapter-pos-(\d+)', pid)
-                if match:
-                    chap_num = int(match.group(1))
+            a_id = a.get('id', '')
+            if a_id and a_id.startswith('chapter-pos-'):
+                try:
+                    chap_num = int(a_id.replace('chapter-pos-', ''))
+                except:
+                    pass
+            # 章节标题
             title_span = a.find('span', class_='text-sm')
-            chap_title = title_span.get_text(strip=True) if title_span else f"第{chap_num}章"
+            if title_span:
+                chap_title = title_span.get_text(strip=True)
+            else:
+                chap_title = a.get_text(strip=True) or f"第{chap_num}章"
             chapter_links.append({
                 'url': full_url,
                 'num': chap_num,
@@ -108,16 +118,33 @@ class DownloadWorker:
         resp = self.fetch_url(play_url)
         if not resp:
             return None
-        pattern = r"url:\s*'([^']+)'"
-        match = re.search(pattern, resp.text)
-        if match:
-            return match.group(1)
+        text = resp.text
+        # 多种匹配模式
+        patterns = [
+            r"url:\s*'([^']+)'",
+            r'"url"\s*:\s*"([^"]+)"',
+            r'<audio[^>]+src="([^"]+)"',
+            r'var\s+audioUrl\s*=\s*[\'"]([^\'"]+)[\'"]',
+            r'audioUrl\s*:\s*[\'"]([^\'"]+)[\'"]',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                url = match.group(1)
+                # 处理转义
+                url = url.replace('\\/', '/')
+                return url
+        # 调试：输出前500字符
+        self.log(f"无法从页面提取音频URL，响应片段：{text[:500]}")
         return None
 
     def download_audio(self, audio_url, save_path):
         proxy = self.get_random_proxy()
         try:
-            with requests.get(audio_url, headers=self.headers, proxies=proxy, stream=True, timeout=self.timeout) as r:
+            # 下载时使用播放页作为 Referer
+            headers = self.headers.copy()
+            headers['Referer'] = self.album_url
+            with requests.get(audio_url, headers=headers, proxies=proxy, stream=True, timeout=self.timeout) as r:
                 if r.status_code == 200:
                     with open(save_path, 'wb') as f:
                         for chunk in r.iter_content(chunk_size=8192):

@@ -355,24 +355,40 @@ class DownloaderApp(Tk):
             resp = requests.get(search_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
             resp.encoding = 'utf-8'
             soup = BeautifulSoup(resp.text, 'html.parser')
+            hot_containers = []
+            for elem in soup.find_all(['div', 'section']):
+                if '热门搜索' in elem.get_text():
+                    hot_containers.append(elem)
             items = []
             for a in soup.find_all('a', href=re.compile(r'^/book/\d+\.html')):
                 href = a.get('href')
                 full_url = requests.compat.urljoin("https://m.i275.com", href)
                 title = a.get_text(strip=True)
-                parent = a.find_parent('div', class_=re.compile('book-item|result-item'))
+                in_hot = False
+                for hot in hot_containers:
+                    if a in hot.descendants:
+                        in_hot = True
+                        break
+                if in_hot:
+                    continue
+                parent = a.find_parent(['div', 'li'], class_=re.compile(r'item|result|book'))
                 if parent:
-                    desc = parent.get_text(' ', strip=True)
+                    extra = parent.get_text(' ', strip=True)
+                    extra = extra.replace(title, '', 1).strip()
+                    if extra:
+                        display = f"{title} - {extra}"
+                    else:
+                        display = title
                 else:
-                    desc = title
-                items.append((full_url, desc))
+                    display = title
+                items.append((full_url, display))
             if not items:
                 self.log("未搜索到结果")
                 return
             self.search_results = items
             self.result_listbox.delete(0, END)
-            for url, desc in items:
-                self.result_listbox.insert(END, desc[:60])
+            for url, display in items:
+                self.result_listbox.insert(END, display[:60])
         except Exception as e:
             messagebox.showerror("搜索失败", str(e))
 

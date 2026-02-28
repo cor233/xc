@@ -20,7 +20,8 @@ class DownloadWorker:
         self.proxy_list = proxy_list
         self.log_queue = log_queue
         self.stop_flag = False
-        self.headers = {
+        self.session = requests.Session()
+        self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -32,8 +33,7 @@ class DownloadWorker:
             "Sec-Fetch-Site": "same-origin",
             "Sec-Fetch-User": "?1",
             "Cache-Control": "max-age=0",
-            "Referer": self.album_url,
-        }
+        })
 
     def log(self, msg):
         self.log_queue.put(msg)
@@ -43,7 +43,7 @@ class DownloadWorker:
             return None
         return random.choice(self.proxy_list)
 
-    def fetch_url(self, url, headers=None, timeout=None, retries=None):
+    def fetch_url(self, url, referer=None, timeout=None, retries=None):
         if timeout is None:
             timeout = self.timeout
         if retries is None:
@@ -53,11 +53,13 @@ class DownloadWorker:
                 return None
             try:
                 proxy = self.get_random_proxy()
-                # 动态设置 Referer
-                if headers is None:
-                    headers = self.headers.copy()
+                # 设置 Referer
+                headers = {}
+                if referer:
+                    headers['Referer'] = referer
+                else:
                     headers['Referer'] = self.album_url
-                resp = requests.get(url, headers=headers, proxies=proxy, timeout=timeout)
+                resp = self.session.get(url, headers=headers, proxies=proxy, timeout=timeout)
                 resp.encoding = 'utf-8'
                 if resp.status_code == 200:
                     return resp
@@ -92,15 +94,13 @@ class DownloadWorker:
         for a in soup.find_all('a', href=re.compile(r'^/play/\d+/\d+\.html')):
             href = a.get('href')
             full_url = requests.compat.urljoin(self.album_url, href)
-            # 从 a 标签的 id 获取序号（如 chapter-pos-25）
-            chap_num = 0
             a_id = a.get('id', '')
+            chap_num = 0
             if a_id and a_id.startswith('chapter-pos-'):
                 try:
                     chap_num = int(a_id.replace('chapter-pos-', ''))
                 except:
                     pass
-            # 章节标题
             title_span = a.find('span', class_='text-sm')
             if title_span:
                 chap_title = title_span.get_text(strip=True)
@@ -115,11 +115,17 @@ class DownloadWorker:
         return chapter_links
 
     def get_audio_url(self, play_url):
-        resp = self.fetch_url(play_url)
+        resp = self.fetch_url(play_url, referer=play_url)
         if not resp:
             return None
         text = resp.text
-        # 多种匹配模式
+        # 检查页面标题，确认是播放页
+        soup = BeautifulSoup(text, 'html.parser')
+        title_tag = soup.find('title')
+        page_title = title_tag.get_text() if title_tag else ""
+        if "正在播放" not in page_title and "贺岁剧" not in page_title:
+            self.log(f"警告：可能不是播放页，标题为：{page_title[:50]}")
+            # 继续尝试提取，可能标题不标准
         patterns = [
             r"url:\s*'([^']+)'",
             r'"url"\s*:\s*"([^"]+)"',
@@ -131,20 +137,16 @@ class DownloadWorker:
             match = re.search(pattern, text)
             if match:
                 url = match.group(1)
-                # 处理转义
                 url = url.replace('\\/', '/')
                 return url
-        # 调试：输出前500字符
-        self.log(f"无法从页面提取音频URL，响应片段：{text[:500]}")
+        self.log(f"无法从页面提取音频URL，响应片段：{text[:300]}")
         return None
 
     def download_audio(self, audio_url, save_path):
         proxy = self.get_random_proxy()
         try:
-            # 下载时使用播放页作为 Referer
-            headers = self.headers.copy()
-            headers['Referer'] = self.album_url
-            with requests.get(audio_url, headers=headers, proxies=proxy, stream=True, timeout=self.timeout) as r:
+            headers = {'Referer': self.album_url}
+            with self.session.get(audio_url, headers=headers, proxies=proxy, stream=True, timeout=self.timeout) as r:
                 if r.status_code == 200:
                     with open(save_path, 'wb') as f:
                         for chunk in r.iter_content(chunk_size=8192):
@@ -184,6 +186,8 @@ class DownloadWorker:
 
     def start_download(self, download_dir):
         self.log("开始获取专辑信息...")
+        # 先访问一次首页，获取可能的 Cookie
+        self.fetch_url("https://m.i275.com/", referer="https://m.i275.com/")
         album_title = self.get_album_title()
         if not download_dir:
             download_dir = os.path.join(os.getcwd(), album_title)

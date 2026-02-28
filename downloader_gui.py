@@ -13,6 +13,7 @@ from tkinter import ttk
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from bs4 import BeautifulSoup
+from fake_useragent import UserAgent
 
 class DownloadWorker:
     def __init__(self, album_url, max_workers, request_delay, retry_times, timeout, save_dir, log_queue):
@@ -26,14 +27,18 @@ class DownloadWorker:
         self.stop_flag = False
         self.pause_flag = False
         self.pause_cond = threading.Condition()
+        self.ua = UserAgent()
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Accept-Encoding": "gzip, deflate, br",
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-User": "?1",
             "Cache-Control": "max-age=0",
         })
         self.downloaded_file = os.path.join(save_dir, '.downloaded.json')
@@ -83,7 +88,7 @@ class DownloadWorker:
                 return None
             self.check_pause()
             try:
-                headers = {}
+                headers = {'User-Agent': self.ua.random}
                 if referer:
                     headers['Referer'] = referer
                 else:
@@ -151,16 +156,16 @@ class DownloadWorker:
             return None
         text = resp.text
         soup = BeautifulSoup(text, 'html.parser')
-        title_tag = soup.find('title')
-        page_title = title_tag.get_text() if title_tag else ""
-        if "正在播放" not in page_title and "贺岁剧" not in page_title:
-            self.log(f"警告：可能不是播放页，标题为：{page_title[:50]}")
         patterns = [
             r"url:\s*'([^']+)'",
             r'"url"\s*:\s*"([^"]+)"',
-            r'<audio[^>]+src="([^"]+)"',
+            r"url:\s*\"([^\"]+)\"",
+            r'audioUrl\s*=\s*[\'"]([^\'"]+)[\'"]',
             r'var\s+audioUrl\s*=\s*[\'"]([^\'"]+)[\'"]',
-            r'audioUrl\s*:\s*[\'"]([^\'"]+)[\'"]',
+            r'<audio[^>]+src="([^"]+)"',
+            r'<source[^>]+src="([^"]+)"',
+            r'"audio"\s*:\s*\{\s*"url"\s*:\s*"([^"]+)"',
+            r'"play_url"\s*:\s*"([^"]+)"',
         ]
         for pattern in patterns:
             match = re.search(pattern, text)
@@ -168,12 +173,21 @@ class DownloadWorker:
                 url = match.group(1)
                 url = url.replace('\\/', '/')
                 return url
+        script_tags = soup.find_all('script')
+        for script in script_tags:
+            if script.string and 'audioUrl' in script.string:
+                lines = script.string.split('\n')
+                for line in lines:
+                    if 'audioUrl' in line:
+                        m = re.search(r'audioUrl\s*[=:]\s*[\'"]([^\'"]+)[\'"]', line)
+                        if m:
+                            return m.group(1).replace('\\/', '/')
         self.log(f"无法从页面提取音频URL，响应片段：{text[:300]}")
         return None
 
     def download_audio(self, audio_url, save_path):
         try:
-            headers = {'Referer': self.album_url}
+            headers = {'User-Agent': self.ua.random, 'Referer': self.album_url}
             with self.session.get(audio_url, headers=headers, stream=True, timeout=self.timeout) as r:
                 if r.status_code == 200:
                     with open(save_path, 'wb') as f:

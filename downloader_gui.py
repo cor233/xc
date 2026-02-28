@@ -192,7 +192,7 @@ class DownloaderApp(Tk):
     def __init__(self):
         super().__init__()
         self.title("有声小说批量下载工具")
-        self.geometry("800x600")
+        self.geometry("900x650")
         self.resizable(True, True)
         self.url_var = StringVar(value="https://m.i275.com/book/39161.html")
         self.max_workers_var = IntVar(value=5)
@@ -200,7 +200,6 @@ class DownloaderApp(Tk):
         self.delay_max_var = DoubleVar(value=1.5)
         self.retry_var = IntVar(value=3)
         self.timeout_var = IntVar(value=15)
-        self.proxy_text = StringVar()
         self.save_path_var = StringVar()
         self.log_queue = queue.Queue()
         self.worker_thread = None
@@ -212,58 +211,55 @@ class DownloaderApp(Tk):
     def create_widgets(self):
         main_frame = Frame(self, padx=10, pady=10)
         main_frame.pack(fill=BOTH, expand=True)
+
         url_frame = Frame(main_frame)
         url_frame.pack(fill=X, pady=5)
         Label(url_frame, text="专辑URL：").pack(side=LEFT)
-        Entry(url_frame, textvariable=self.url_var, width=80).pack(side=LEFT, padx=5, expand=True, fill=X)
-        Button(url_frame, text="开始下载", command=self.start_download, bg="green", fg="white").pack(side=LEFT, padx=5)
-        config_frame = LabelFrame(main_frame, text="高级设置", padx=5, pady=5)
-        config_frame.pack(fill=X, pady=5)
-        row1 = Frame(config_frame)
-        row1.pack(fill=X, pady=2)
-        Label(row1, text="并发线程数：").pack(side=LEFT)
-        Spinbox(row1, from_=1, to=20, textvariable=self.max_workers_var, width=5).pack(side=LEFT, padx=5)
-        Label(row1, text="重试次数：").pack(side=LEFT, padx=(20,0))
-        Spinbox(row1, from_=0, to=10, textvariable=self.retry_var, width=5).pack(side=LEFT, padx=5)
-        Label(row1, text="超时(秒)：").pack(side=LEFT, padx=(20,0))
-        Spinbox(row1, from_=5, to=60, textvariable=self.timeout_var, width=5).pack(side=LEFT, padx=5)
-        row2 = Frame(config_frame)
-        row2.pack(fill=X, pady=2)
-        Label(row2, text="请求延迟(秒)：").pack(side=LEFT)
-        Entry(row2, textvariable=self.delay_min_var, width=5).pack(side=LEFT, padx=2)
-        Label(row2, text=" - ").pack(side=LEFT)
-        Entry(row2, textvariable=self.delay_max_var, width=5).pack(side=LEFT, padx=2)
-        Label(row2, text="(随机延迟，避免被封)").pack(side=LEFT, padx=10)
-        row3 = Frame(config_frame)
-        row3.pack(fill=X, pady=2)
-        Label(row3, text="代理列表(每行一个，格式: {'http':'url','https':'url'})：").pack(anchor=W)
-        self.proxy_entry = Text(row3, height=4, width=80)
+        Entry(url_frame, textvariable=self.url_var, width=70).pack(side=LEFT, padx=5, expand=True, fill=X)
+
+        proxy_frame = Frame(main_frame)
+        proxy_frame.pack(fill=X, pady=5)
+        Label(proxy_frame, text="代理列表(每行一个，格式: {'http':'url','https':'url'})：").pack(anchor=W)
+        self.proxy_entry = Text(proxy_frame, height=3, width=80)
         self.proxy_entry.pack(fill=X, pady=2)
-        row4 = Frame(config_frame)
-        row4.pack(fill=X, pady=2)
-        Label(row4, text="保存目录：").pack(side=LEFT)
-        Entry(row4, textvariable=self.save_path_var, width=60).pack(side=LEFT, padx=5, expand=True, fill=X)
-        Button(row4, text="浏览", command=self.select_save_dir).pack(side=LEFT)
+
+        config_frame = Frame(main_frame)
+        config_frame.pack(fill=X, pady=5)
+        Label(config_frame, text="并发数：").pack(side=LEFT)
+        Spinbox(config_frame, from_=1, to=20, textvariable=self.max_workers_var, width=4).pack(side=LEFT, padx=2)
+        Label(config_frame, text="重试：").pack(side=LEFT, padx=(10,0))
+        Spinbox(config_frame, from_=0, to=10, textvariable=self.retry_var, width=4).pack(side=LEFT, padx=2)
+        Label(config_frame, text="超时：").pack(side=LEFT, padx=(10,0))
+        Spinbox(config_frame, from_=5, to=60, textvariable=self.timeout_var, width=4).pack(side=LEFT, padx=2)
+        Label(config_frame, text="延迟范围：").pack(side=LEFT, padx=(10,0))
+        Entry(config_frame, textvariable=self.delay_min_var, width=4).pack(side=LEFT)
+        Label(config_frame, text="-").pack(side=LEFT)
+        Entry(config_frame, textvariable=self.delay_max_var, width=4).pack(side=LEFT)
+
+        dir_frame = Frame(main_frame)
+        dir_frame.pack(fill=X, pady=5)
+        Label(dir_frame, text="保存目录：").pack(side=LEFT)
+        Entry(dir_frame, textvariable=self.save_path_var, width=60).pack(side=LEFT, padx=5, expand=True, fill=X)
+        Button(dir_frame, text="浏览", command=self.select_save_dir).pack(side=LEFT)
+
+        ctrl_frame = Frame(main_frame)
+        ctrl_frame.pack(fill=X, pady=5)
+        self.start_btn = Button(ctrl_frame, text="开始下载", command=self.start_download, bg="green", fg="white", width=15)
+        self.start_btn.pack(side=LEFT, padx=2)
+        self.stop_btn = Button(ctrl_frame, text="停止", command=self.stop_download, state=DISABLED, bg="red", fg="white", width=8)
+        self.stop_btn.pack(side=LEFT, padx=5)
+
         log_frame = LabelFrame(main_frame, text="下载日志")
         log_frame.pack(fill=BOTH, expand=True, pady=5)
         self.log_text = scrolledtext.ScrolledText(log_frame, wrap=WORD, height=15)
         self.log_text.pack(fill=BOTH, expand=True)
-        self.stop_btn = Button(main_frame, text="停止下载", command=self.stop_download, state=DISABLED, bg="red", fg="white")
-        self.stop_btn.pack(pady=5)
 
     def select_save_dir(self):
         dir_path = filedialog.askdirectory(title="选择保存目录")
         if dir_path:
             self.save_path_var.set(dir_path)
 
-    def start_download(self):
-        if self.running:
-            messagebox.showwarning("提示", "下载已在运行中")
-            return
-        url = self.url_var.get().strip()
-        if not url:
-            messagebox.showerror("错误", "请输入专辑URL")
-            return
+    def parse_proxy(self):
         proxy_text = self.proxy_entry.get("1.0", END).strip()
         proxy_list = []
         if proxy_text:
@@ -276,6 +272,18 @@ class DownloaderApp(Tk):
                             proxy_list.append(proxy_dict)
                     except:
                         self.log("代理格式错误，已忽略：" + line)
+        return proxy_list
+
+    def start_download(self):
+        if self.running:
+            messagebox.showwarning("提示", "已有任务在运行")
+            return
+        url = self.url_var.get().strip()
+        if not url:
+            messagebox.showerror("错误", "请输入专辑URL")
+            return
+        save_dir = self.save_path_var.get().strip()
+        proxy_list = self.parse_proxy()
         self.worker = DownloadWorker(
             album_url=url,
             max_workers=self.max_workers_var.get(),
@@ -286,8 +294,9 @@ class DownloaderApp(Tk):
             log_queue=self.log_queue
         )
         self.running = True
+        self.start_btn.config(state=DISABLED)
         self.stop_btn.config(state=NORMAL)
-        self.worker_thread = threading.Thread(target=self.worker.start_download, args=(self.save_path_var.get(),))
+        self.worker_thread = threading.Thread(target=self.worker.start_download, args=(save_dir,))
         self.worker_thread.daemon = True
         self.worker_thread.start()
 
@@ -295,8 +304,9 @@ class DownloaderApp(Tk):
         if self.worker:
             self.worker.stop_flag = True
         self.running = False
+        self.start_btn.config(state=NORMAL)
         self.stop_btn.config(state=DISABLED)
-        self.log("用户请求停止下载...")
+        self.log("用户请求停止...")
 
     def update_log(self):
         while True:
@@ -309,6 +319,7 @@ class DownloaderApp(Tk):
         if self.worker_thread and not self.worker_thread.is_alive():
             if self.running:
                 self.running = False
+                self.start_btn.config(state=NORMAL)
                 self.stop_btn.config(state=DISABLED)
                 self.log("下载线程已结束")
         self.after(100, self.update_log)

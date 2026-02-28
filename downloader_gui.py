@@ -4,8 +4,8 @@ import time
 import random
 import threading
 import queue
-import json
 import urllib.parse
+import json
 from tkinter import *
 from tkinter import scrolledtext, messagebox, filedialog
 from tkinter import ttk
@@ -13,57 +13,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from bs4 import BeautifulSoup
 
-# ==================== 配置 ====================
-STORAGE_FILE = "downloaded_records.json"   # 记录已下载章节的文件
-MAX_CONCURRENT = 3
-MAX_RETRIES = 3
-RETRY_DELAY_BASE = 2
-REQUEST_DELAY = 0.5
-
-# ==================== 辅助函数 ====================
-def load_downloaded_set(book_id):
-    """从本地JSON文件加载已下载章节的URL集合"""
-    if not os.path.exists(STORAGE_FILE):
-        return set()
-    try:
-        with open(STORAGE_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        return set(data.get(book_id, []))
-    except:
-        return set()
-
-def save_downloaded_set(book_id, downloaded_set):
-    """保存已下载章节的URL集合到JSON文件"""
-    data = {}
-    if os.path.exists(STORAGE_FILE):
-        try:
-            with open(STORAGE_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        except:
-            data = {}
-    data[book_id] = list(downloaded_set)
-    with open(STORAGE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def sanitize_filename(name):
-    """过滤文件名中的非法字符"""
-    name = re.sub(r'[\\/*?:"<>|]', '_', name)
-    return name.strip()
-
-# ==================== 下载工作线程 ====================
 class DownloadWorker:
-    def __init__(self, album_url, max_workers, request_delay, retry_times, timeout, proxy_list, log_queue, book_id, downloaded_set):
+    def __init__(self, album_url, max_workers, request_delay, retry_times, timeout, save_dir, log_queue):
         self.album_url = album_url
         self.max_workers = max_workers
         self.request_delay = request_delay
         self.retry_times = retry_times
         self.timeout = timeout
-        self.proxy_list = proxy_list
+        self.save_dir = save_dir
         self.log_queue = log_queue
-        self.book_id = book_id
-        self.downloaded_set = downloaded_set
         self.stop_flag = False
-        self.pause_flag = False
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -72,22 +31,24 @@ class DownloadWorker:
             "Accept-Encoding": "gzip, deflate, br",
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
             "Cache-Control": "max-age=0",
         })
-        # 初始化会话，访问首页获取必要Cookie
-        self.fetch_url("https://m.i275.com/", referer="https://m.i275.com/")
+        self.downloaded_file = os.path.join(save_dir, '.downloaded.json')
+        self.load_downloaded()
 
     def log(self, msg):
         self.log_queue.put(msg)
 
-    def get_random_proxy(self):
-        if not self.proxy_list:
-            return None
-        return random.choice(self.proxy_list)
+    def load_downloaded(self):
+        if os.path.exists(self.downloaded_file):
+            with open(self.downloaded_file, 'r', encoding='utf-8') as f:
+                self.downloaded = set(json.load(f))
+        else:
+            self.downloaded = set()
+
+    def save_downloaded(self):
+        with open(self.downloaded_file, 'w', encoding='utf-8') as f:
+            json.dump(list(self.downloaded), f, ensure_ascii=False)
 
     def fetch_url(self, url, referer=None, timeout=None, retries=None):
         if timeout is None:
@@ -98,13 +59,12 @@ class DownloadWorker:
             if self.stop_flag:
                 return None
             try:
-                proxy = self.get_random_proxy()
                 headers = {}
                 if referer:
                     headers['Referer'] = referer
                 else:
                     headers['Referer'] = self.album_url
-                resp = self.session.get(url, headers=headers, proxies=proxy, timeout=timeout)
+                resp = self.session.get(url, headers=headers, timeout=timeout)
                 resp.encoding = 'utf-8'
                 if resp.status_code == 200:
                     return resp
@@ -127,7 +87,7 @@ class DownloadWorker:
             title_tag = soup.find('title')
             title = title_tag.get_text(strip=True) if title_tag else "未知专辑"
             title = re.sub(r'[-|]\s*275听书网.*$', '', title).strip()
-        title = sanitize_filename(title)
+        title = re.sub(r'[\\/*?:"<>|]', '_', title)
         return title
 
     def get_chapter_links(self):
@@ -186,10 +146,9 @@ class DownloadWorker:
         return None
 
     def download_audio(self, audio_url, save_path):
-        proxy = self.get_random_proxy()
         try:
             headers = {'Referer': self.album_url}
-            with self.session.get(audio_url, headers=headers, proxies=proxy, stream=True, timeout=self.timeout) as r:
+            with self.session.get(audio_url, headers=headers, stream=True, timeout=self.timeout) as r:
                 if r.status_code == 200:
                     with open(save_path, 'wb') as f:
                         for chunk in r.iter_content(chunk_size=8192):
@@ -204,168 +163,127 @@ class DownloadWorker:
             self.log(f"下载异常: {e}")
             return False
 
-    def process_chapter(self, chapter, download_dir, progress_callback):
+    def process_chapter(self, chapter, download_dir):
         chap_num = chapter['num']
         chap_title = chapter['title']
         play_url = chapter['url']
-        self.log(f"[{chap_num}] 开始处理：{chap_title}")
-
-        # 检查是否已下载
-        if play_url in self.downloaded_set:
+        if play_url in self.downloaded:
             self.log(f"[{chap_num}] 已下载，跳过")
-            progress_callback('skipped')
-            return
-
-        # 检查暂停/停止
-        if self.stop_flag: return
-        while self.pause_flag and not self.stop_flag:
-            time.sleep(0.5)
-        if self.stop_flag: return
-
-        # 获取音频URL（带重试）
-        audio_url = None
-        for attempt in range(self.retry_times):
-            if self.stop_flag or self.pause_flag:
-                return
-            audio_url = self.get_audio_url(play_url)
-            if audio_url:
-                break
-            self.log(f"[{chap_num}] 获取音频URL失败，{RETRY_DELAY_BASE}s后重试 ({attempt+1}/{self.retry_times})")
-            time.sleep(RETRY_DELAY_BASE)
+            return True
+        self.log(f"[{chap_num}] 开始处理：{chap_title}")
+        time.sleep(random.uniform(*self.request_delay))
+        audio_url = self.get_audio_url(play_url)
         if not audio_url:
             self.log(f"[{chap_num}] 获取音频URL失败，跳过")
-            progress_callback('failed', chapter)
-            return
-
-        # 检查暂停/停止
-        if self.stop_flag or self.pause_flag:
-            return
-
-        # 下载音频（带重试）
-        safe_title = sanitize_filename(chap_title)
+            return False
+        safe_title = re.sub(r'[\\/*?:"<>|]', '_', chap_title)
         filename = f"{chap_num:03d}_{safe_title}.m4a"
         filepath = os.path.join(download_dir, filename)
-
-        success = False
-        for attempt in range(self.retry_times):
-            if self.stop_flag or self.pause_flag:
-                return
-            success = self.download_audio(audio_url, filepath)
-            if success:
-                break
-            self.log(f"[{chap_num}] 下载失败，{RETRY_DELAY_BASE}s后重试 ({attempt+1}/{self.retry_times})")
-            time.sleep(RETRY_DELAY_BASE)
-
+        success = self.download_audio(audio_url, filepath)
         if success:
+            self.downloaded.add(play_url)
+            self.save_downloaded()
             self.log(f"[{chap_num}] 下载完成 -> {filename}")
-            self.downloaded_set.add(play_url)
-            save_downloaded_set(self.book_id, self.downloaded_set)
-            progress_callback('completed')
+            return True
         else:
             self.log(f"[{chap_num}] 下载失败")
-            progress_callback('failed', chapter)
+            return False
 
-    def start_download(self, download_dir, chapters, progress_callback, finished_callback):
+    def start_download(self, download_dir):
+        self.log("开始获取专辑信息...")
+        self.fetch_url("https://m.i275.com/", referer="https://m.i275.com/")
+        album_title = self.get_album_title()
+        self.log(f"专辑标题：{album_title}")
+        os.makedirs(download_dir, exist_ok=True)
         self.log(f"保存目录：{download_dir}")
+        self.log("正在获取章节列表...")
+        chapters = self.get_chapter_links()
+        if not chapters:
+            self.log("未找到任何章节，请检查URL或网络。")
+            return
         self.log(f"共找到 {len(chapters)} 个章节")
-        self.log("开始下载...")
-
-        total = len(chapters)
-        completed = 0
-        failed = 0
-        skipped = 0
-        failed_chapters = []
-        lock = threading.Lock()
-
-        def update_progress(status, chapter=None):
-            nonlocal completed, failed, skipped, failed_chapters
-            with lock:
-                if status == 'completed':
-                    completed += 1
-                elif status == 'failed' and chapter:
-                    failed += 1
-                    failed_chapters.append(chapter)
-                elif status == 'skipped':
-                    skipped += 1
-                progress_callback(completed, failed, skipped, total, failed_chapters)
-
-        # 使用线程池管理并发
+        self.failed_chapters = []
+        success_count = 0
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_chapter = {}
-            for chapter in chapters:
+            future_to_chap = {
+                executor.submit(self.process_chapter, chap, download_dir): chap
+                for chap in chapters
+            }
+            for future in as_completed(future_to_chap):
                 if self.stop_flag:
+                    executor.shutdown(wait=False)
+                    self.log("下载已停止")
                     break
-                while self.pause_flag and not self.stop_flag:
-                    time.sleep(0.5)
-                if self.stop_flag:
-                    break
-                future = executor.submit(self.process_chapter, chapter, download_dir, update_progress)
-                future_to_chapter[future] = chapter
-
-            # 等待所有任务完成或停止
-            for future in as_completed(future_to_chapter):
-                if self.stop_flag:
-                    # 取消尚未开始的任务
-                    for f in future_to_chapter:
-                        f.cancel()
-                    break
-                chapter = future_to_chapter[future]
+                chap = future_to_chap[future]
                 try:
-                    future.result()  # 如果有异常会抛出
+                    result = future.result()
+                    if result:
+                        success_count += 1
+                    else:
+                        self.failed_chapters.append(chap)
                 except Exception as e:
-                    self.log(f"[{chapter['num']}] 处理异常: {e}")
-                    with lock:
-                        failed += 1
-                        failed_chapters.append(chapter)
-                        update_progress('failed', chapter)
+                    self.log(f"[{chap['num']}] 处理异常: {e}")
+                    self.failed_chapters.append(chap)
+        self.log(f"下载完成！成功 {success_count}/{len(chapters)} 章")
+        if self.failed_chapters:
+            self.log(f"失败 {len(self.failed_chapters)} 章，可点击重试")
 
-        finished_callback(completed, failed, skipped, total, failed_chapters)
+    def retry_failed(self, download_dir):
+        if not hasattr(self, 'failed_chapters') or not self.failed_chapters:
+            self.log("没有失败章节需要重试")
+            return
+        self.log(f"开始重试 {len(self.failed_chapters)} 个失败章节")
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_chap = {
+                executor.submit(self.process_chapter, chap, download_dir): chap
+                for chap in self.failed_chapters
+            }
+            for future in as_completed(future_to_chap):
+                if self.stop_flag:
+                    executor.shutdown(wait=False)
+                    self.log("重试已停止")
+                    break
+                chap = future_to_chap[future]
+                try:
+                    result = future.result()
+                    if result:
+                        self.failed_chapters = [c for c in self.failed_chapters if c['url'] != chap['url']]
+                except Exception as e:
+                    self.log(f"[{chap['num']}] 重试异常: {e}")
+        self.log("重试完成")
 
-    def pause(self):
-        self.pause_flag = True
-
-    def resume(self):
-        self.pause_flag = False
-
-    def stop(self):
-        self.stop_flag = True
-
-# ==================== 主界面 ====================
 class DownloaderApp(Tk):
     def __init__(self):
         super().__init__()
         self.title("有声小说搜索下载器")
-        self.geometry("950x750")
+        self.geometry("950x700")
         self.resizable(True, True)
         self.search_var = StringVar()
-        self.max_workers_var = IntVar(value=MAX_CONCURRENT)
+        self.max_workers_var = IntVar(value=5)
         self.delay_min_var = DoubleVar(value=0.5)
         self.delay_max_var = DoubleVar(value=1.5)
-        self.retry_var = IntVar(value=MAX_RETRIES)
+        self.retry_var = IntVar(value=3)
         self.timeout_var = IntVar(value=15)
         self.save_path_var = StringVar()
         self.selected_book_url = None
-        self.selected_book_id = None
+        self.selected_book_title = None
         self.log_queue = queue.Queue()
+        self.worker_thread = None
         self.worker = None
         self.running = False
-        self.paused = False
         self.create_widgets()
         self.update_log()
-        self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def create_widgets(self):
         main_frame = Frame(self, padx=10, pady=10)
         main_frame.pack(fill=BOTH, expand=True)
 
-        # 搜索区域
         search_frame = Frame(main_frame)
         search_frame.pack(fill=X, pady=5)
         Label(search_frame, text="关键词：").pack(side=LEFT)
         Entry(search_frame, textvariable=self.search_var, width=50).pack(side=LEFT, padx=5, expand=True, fill=X)
         Button(search_frame, text="搜索", command=self.search, bg="blue", fg="white", width=10).pack(side=LEFT, padx=5)
 
-        # 搜索结果列表
         result_frame = LabelFrame(main_frame, text="搜索结果")
         result_frame.pack(fill=BOTH, expand=True, pady=5)
         columns = ('书名', '演播', '作者')
@@ -384,14 +302,6 @@ class DownloaderApp(Tk):
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.bind('<<TreeviewSelect>>', self.on_select)
 
-        # 代理输入
-        proxy_frame = Frame(main_frame)
-        proxy_frame.pack(fill=X, pady=5)
-        Label(proxy_frame, text="代理列表(每行一个，格式: {'http':'url','https':'url'})：").pack(anchor=W)
-        self.proxy_entry = Text(proxy_frame, height=3, width=80)
-        self.proxy_entry.pack(fill=X, pady=2)
-
-        # 下载参数设置
         config_frame = Frame(main_frame)
         config_frame.pack(fill=X, pady=5)
         Label(config_frame, text="并发数：").pack(side=LEFT)
@@ -405,57 +315,21 @@ class DownloaderApp(Tk):
         Label(config_frame, text="-").pack(side=LEFT)
         Entry(config_frame, textvariable=self.delay_max_var, width=4).pack(side=LEFT)
 
-        # 保存目录选择
         dir_frame = Frame(main_frame)
         dir_frame.pack(fill=X, pady=5)
         Label(dir_frame, text="保存目录：").pack(side=LEFT)
         Entry(dir_frame, textvariable=self.save_path_var, width=60).pack(side=LEFT, padx=5, expand=True, fill=X)
         Button(dir_frame, text="浏览", command=self.select_save_dir).pack(side=LEFT)
 
-        # ===== 下载控制面板 =====
-        panel_frame = LabelFrame(main_frame, text="下载控制面板")
-        panel_frame.pack(fill=X, pady=5)
-
-        # 统计信息
-        stats_frame = Frame(panel_frame)
-        stats_frame.pack(fill=X, pady=5)
-        self.total_label = Label(stats_frame, text="总章节: 0")
-        self.total_label.pack(side=LEFT, padx=5)
-        self.completed_label = Label(stats_frame, text="已完成: 0", fg="green")
-        self.completed_label.pack(side=LEFT, padx=5)
-        self.failed_label = Label(stats_frame, text="失败: 0", fg="red")
-        self.failed_label.pack(side=LEFT, padx=5)
-        self.skipped_label = Label(stats_frame, text="跳过: 0", fg="orange")
-        self.skipped_label.pack(side=LEFT, padx=5)
-
-        # 进度条
-        self.progress = ttk.Progressbar(panel_frame, orient=HORIZONTAL, length=400, mode='determinate')
-        self.progress.pack(fill=X, pady=5)
-
-        # 失败章节列表
-        fail_frame = Frame(panel_frame)
-        fail_frame.pack(fill=X, pady=5)
-        Label(fail_frame, text="失败章节：").pack(anchor=W)
-        self.failed_list_text = scrolledtext.ScrolledText(fail_frame, height=3, wrap=WORD)
-        self.failed_list_text.pack(fill=X)
-
-        # 按钮行
-        btn_frame = Frame(panel_frame)
-        btn_frame.pack(fill=X, pady=5)
-        self.start_btn = Button(btn_frame, text="开始下载", command=self.start_download, bg="green", fg="white", width=12)
+        ctrl_frame = Frame(main_frame)
+        ctrl_frame.pack(fill=X, pady=5)
+        self.start_btn = Button(ctrl_frame, text="开始下载选中书籍", command=self.start_download, bg="green", fg="white", width=20)
         self.start_btn.pack(side=LEFT, padx=2)
-        self.pause_btn = Button(btn_frame, text="暂停", command=self.pause_download, state=DISABLED, bg="orange", fg="white", width=8)
-        self.pause_btn.pack(side=LEFT, padx=2)
-        self.resume_btn = Button(btn_frame, text="继续", command=self.resume_download, state=DISABLED, bg="blue", fg="white", width=8)
-        self.resume_btn.pack(side=LEFT, padx=2)
-        self.check_btn = Button(btn_frame, text="检查缺失", command=self.check_missing, state=DISABLED, bg="purple", fg="white", width=8)
-        self.check_btn.pack(side=LEFT, padx=2)
-        self.retry_btn = Button(btn_frame, text="重试失败", command=self.retry_failed, state=DISABLED, bg="orange", fg="white", width=8)
+        self.retry_btn = Button(ctrl_frame, text="重试失败章节", command=self.retry_failed, bg="orange", fg="white", width=15, state=DISABLED)
         self.retry_btn.pack(side=LEFT, padx=2)
-        self.reset_btn = Button(btn_frame, text="重置记录", command=self.reset_records, bg="red", fg="white", width=8)
-        self.reset_btn.pack(side=LEFT, padx=2)
+        self.stop_btn = Button(ctrl_frame, text="停止", command=self.stop_download, state=DISABLED, bg="red", fg="white", width=8)
+        self.stop_btn.pack(side=LEFT, padx=5)
 
-        # 日志输出
         log_frame = LabelFrame(main_frame, text="下载日志")
         log_frame.pack(fill=BOTH, expand=True, pady=5)
         self.log_text = scrolledtext.ScrolledText(log_frame, wrap=WORD, height=10)
@@ -465,21 +339,6 @@ class DownloaderApp(Tk):
         dir_path = filedialog.askdirectory(title="选择保存目录")
         if dir_path:
             self.save_path_var.set(dir_path)
-
-    def parse_proxy(self):
-        proxy_text = self.proxy_entry.get("1.0", END).strip()
-        proxy_list = []
-        if proxy_text:
-            for line in proxy_text.splitlines():
-                line = line.strip()
-                if line:
-                    try:
-                        proxy_dict = eval(line)
-                        if isinstance(proxy_dict, dict):
-                            proxy_list.append(proxy_dict)
-                    except:
-                        self.log("代理格式错误，已忽略：" + line)
-        return proxy_list
 
     def search(self):
         keyword = self.search_var.get().strip()
@@ -491,19 +350,14 @@ class DownloaderApp(Tk):
             self.tree.delete(item)
         search_url = f"https://m.i275.com/search.php?q={urllib.parse.quote(keyword)}"
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer": "https://m.i275.com/",
-            }
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
             resp = requests.get(search_url, headers=headers, timeout=15)
             resp.encoding = 'utf-8'
             if resp.status_code != 200:
                 self.log(f"搜索请求失败，状态码 {resp.status_code}")
                 return
             soup = BeautifulSoup(resp.text, 'html.parser')
-            # 获取所有书籍链接，并确保有h3标签（书名）
             items = soup.find_all('a', href=re.compile(r'^/book/\d+\.html'))
-            items = [a for a in items if a.find('h3')]
             if not items:
                 self.log("未找到相关结果")
                 return
@@ -511,19 +365,20 @@ class DownloaderApp(Tk):
             for a in items:
                 href = a.get('href')
                 book_url = requests.compat.urljoin("https://m.i275.com/", href)
-                h3 = a.find('h3')
-                title = h3.get_text(strip=True) if h3 else "未知书名"
-                # 提取演播和作者
+                img = a.find('img')
+                cover = img.get('src') if img else ""
+                title_div = a.find('h3') or a.find('div', class_='font-medium')
+                title = title_div.get_text(strip=True) if title_div else "未知书名"
+                info_spans = a.find_all('p', class_='text-xs')
                 announcer = ""
                 author = ""
-                info_spans = a.find_all('p', class_='text-xs')
                 for p in info_spans:
                     text = p.get_text(strip=True)
                     if "演播" in text:
                         announcer = text.replace("演播", "").strip()
                     elif "作者" in text:
                         author = text.replace("作者", "").strip()
-                self.tree.insert('', 'end', text=str(index), values=(title, announcer, author), tags=(book_url,))
+                self.tree.insert('', 'end', text=str(index), values=(title, announcer, author), tags=(book_url, title))
                 index += 1
             self.log(f"搜索完成，共找到 {len(items)} 条结果")
         except Exception as e:
@@ -533,12 +388,9 @@ class DownloaderApp(Tk):
         selected = self.tree.selection()
         if selected:
             item = selected[0]
-            book_url = self.tree.item(item, 'tags')[0]
-            self.selected_book_url = book_url
-            match = re.search(r'/book/(\d+)\.html', book_url)
-            if match:
-                self.selected_book_id = match.group(1)
-            self.log(f"已选中：{self.tree.item(item, 'values')[0]}")
+            self.selected_book_url = self.tree.item(item, 'tags')[0]
+            self.selected_book_title = self.tree.item(item, 'tags')[1]
+            self.log(f"已选中：{self.selected_book_title}")
 
     def start_download(self):
         if self.running:
@@ -549,165 +401,48 @@ class DownloaderApp(Tk):
             return
         save_dir = self.save_path_var.get().strip()
         if not save_dir:
-            save_dir = filedialog.askdirectory(title="选择音频保存目录")
-            if not save_dir:
-                return
+            save_dir = os.getcwd()
             self.save_path_var.set(save_dir)
-        proxy_list = self.parse_proxy()
-
-        downloaded_set = load_downloaded_set(self.selected_book_id)
-
+        book_dir = os.path.join(save_dir, self.selected_book_title)
         self.worker = DownloadWorker(
             album_url=self.selected_book_url,
             max_workers=self.max_workers_var.get(),
             request_delay=(self.delay_min_var.get(), self.delay_max_var.get()),
             retry_times=self.retry_var.get(),
             timeout=self.timeout_var.get(),
-            proxy_list=proxy_list,
-            log_queue=self.log_queue,
-            book_id=self.selected_book_id,
-            downloaded_set=downloaded_set
+            save_dir=book_dir,
+            log_queue=self.log_queue
         )
-
-        self.log("正在获取章节列表...")
-        chapters = self.worker.get_chapter_links()
-        if not chapters:
-            self.log("未找到任何章节，请检查URL或网络。")
-            return
-        self.chapters = chapters
-        self.total_chapters = len(chapters)
-        self.total_label.config(text=f"总章节: {self.total_chapters}")
-        self.progress['maximum'] = self.total_chapters
-        self.update_stats(0, 0, 0, self.total_chapters, [])
-
         self.running = True
-        self.paused = False
         self.start_btn.config(state=DISABLED)
-        self.pause_btn.config(state=NORMAL)
-        self.resume_btn.config(state=DISABLED)
-        self.check_btn.config(state=DISABLED)
         self.retry_btn.config(state=DISABLED)
-
-        self.worker.start_download(
-            download_dir=save_dir,
-            chapters=chapters,
-            progress_callback=self.update_stats,
-            finished_callback=self.download_finished
-        )
-
-    def pause_download(self):
-        if self.worker and self.running and not self.paused:
-            self.worker.pause()
-            self.paused = True
-            self.pause_btn.config(state=DISABLED)
-            self.resume_btn.config(state=NORMAL)
-            self.log("下载已暂停")
-
-    def resume_download(self):
-        if self.worker and self.running and self.paused:
-            self.worker.resume()
-            self.paused = False
-            self.pause_btn.config(state=NORMAL)
-            self.resume_btn.config(state=DISABLED)
-            self.log("下载继续")
-
-    def update_stats(self, completed, failed, skipped, total, failed_chapters):
-        self.completed_label.config(text=f"已完成: {completed}")
-        self.failed_label.config(text=f"失败: {failed}")
-        self.skipped_label.config(text=f"跳过: {skipped}")
-        self.progress['value'] = completed + failed + skipped
-
-        self.failed_list_text.delete(1.0, END)
-        if failed_chapters:
-            for fc in failed_chapters:
-                self.failed_list_text.insert(END, f"第 {fc['num']} 章：{fc['title']}\n")
-            self.retry_btn.config(state=NORMAL)
-        else:
-            self.failed_list_text.insert(END, "暂无失败章节")
-            self.retry_btn.config(state=DISABLED)
-
-    def download_finished(self, completed, failed, skipped, total, failed_chapters):
-        self.running = False
-        self.paused = False
-        self.start_btn.config(state=NORMAL)
-        self.pause_btn.config(state=DISABLED)
-        self.resume_btn.config(state=DISABLED)
-        self.check_btn.config(state=NORMAL)
-        self.log(f"下载完成！成功: {completed} 失败: {failed} 跳过: {skipped}")
-
-    def check_missing(self):
-        if not self.selected_book_id or not hasattr(self, 'chapters'):
-            return
-        downloaded_set = load_downloaded_set(self.selected_book_id)
-        missing = [ch for ch in self.chapters if ch['url'] not in downloaded_set]
-        if missing:
-            self.log(f"发现 {len(missing)} 章缺失")
-            self.failed_list_text.delete(1.0, END)
-            for ch in missing:
-                self.failed_list_text.insert(END, f"第 {ch['num']} 章：{ch['title']}\n")
-            self.retry_btn.config(state=NORMAL)
-        else:
-            self.log("所有章节均已记录，无缺失")
-            self.failed_list_text.delete(1.0, END)
-            self.failed_list_text.insert(END, "暂无缺失章节")
-            self.retry_btn.config(state=DISABLED)
+        self.stop_btn.config(state=NORMAL)
+        self.worker_thread = threading.Thread(target=self.worker.start_download, args=(book_dir,))
+        self.worker_thread.daemon = True
+        self.worker_thread.start()
 
     def retry_failed(self):
-        failed_text = self.failed_list_text.get(1.0, END).strip()
-        if not failed_text or failed_text == "暂无失败章节" or failed_text == "暂无缺失章节":
+        if not self.worker:
             return
-        failed_chapters = []
-        for line in failed_text.splitlines():
-            match = re.search(r'第 (\d+) 章', line)
-            if match:
-                num = int(match.group(1))
-                for ch in self.chapters:
-                    if ch['num'] == num:
-                        failed_chapters.append(ch)
-                        break
-        if failed_chapters:
-            self.log(f"准备重试 {len(failed_chapters)} 章")
-            save_dir = self.save_path_var.get().strip()
-            if not save_dir:
-                save_dir = filedialog.askdirectory(title="选择音频保存目录")
-                if not save_dir:
-                    return
-                self.save_path_var.set(save_dir)
-            proxy_list = self.parse_proxy()
-            downloaded_set = load_downloaded_set(self.selected_book_id)
-            self.worker = DownloadWorker(
-                album_url=self.selected_book_url,
-                max_workers=self.max_workers_var.get(),
-                request_delay=(self.delay_min_var.get(), self.delay_max_var.get()),
-                retry_times=self.retry_var.get(),
-                timeout=self.timeout_var.get(),
-                proxy_list=proxy_list,
-                log_queue=self.log_queue,
-                book_id=self.selected_book_id,
-                downloaded_set=downloaded_set
-            )
-            self.running = True
-            self.paused = False
-            self.start_btn.config(state=DISABLED)
-            self.pause_btn.config(state=NORMAL)
-            self.resume_btn.config(state=DISABLED)
-            self.check_btn.config(state=DISABLED)
-            self.retry_btn.config(state=DISABLED)
-            self.worker.start_download(
-                download_dir=save_dir,
-                chapters=failed_chapters,
-                progress_callback=self.update_stats,
-                finished_callback=self.download_finished
-            )
+        if self.running:
+            messagebox.showwarning("提示", "请等待当前任务完成")
+            return
+        self.running = True
+        self.start_btn.config(state=DISABLED)
+        self.retry_btn.config(state=DISABLED)
+        self.stop_btn.config(state=NORMAL)
+        self.worker_thread = threading.Thread(target=self.worker.retry_failed, args=(os.path.join(self.save_path_var.get().strip() or os.getcwd(), self.selected_book_title),))
+        self.worker_thread.daemon = True
+        self.worker_thread.start()
 
-    def reset_records(self):
-        if self.selected_book_id:
-            if messagebox.askyesno("确认", "确定清除当前书籍的下载记录吗？"):
-                save_downloaded_set(self.selected_book_id, set())
-                self.log("已清除下载记录")
-                self.update_stats(0, 0, 0, self.total_chapters if hasattr(self, 'total_chapters') else 0, [])
-                self.failed_list_text.delete(1.0, END)
-                self.failed_list_text.insert(END, "暂无失败章节")
+    def stop_download(self):
+        if self.worker:
+            self.worker.stop_flag = True
+        self.running = False
+        self.start_btn.config(state=NORMAL)
+        self.retry_btn.config(state=NORMAL if hasattr(self.worker, 'failed_chapters') and self.worker.failed_chapters else DISABLED)
+        self.stop_btn.config(state=DISABLED)
+        self.log("用户请求停止...")
 
     def update_log(self):
         while True:
@@ -717,19 +452,17 @@ class DownloaderApp(Tk):
                 self.log_text.see(END)
             except queue.Empty:
                 break
+        if self.worker_thread and not self.worker_thread.is_alive():
+            if self.running:
+                self.running = False
+                self.start_btn.config(state=NORMAL)
+                self.retry_btn.config(state=NORMAL if hasattr(self.worker, 'failed_chapters') and self.worker.failed_chapters else DISABLED)
+                self.stop_btn.config(state=DISABLED)
+                self.log("下载线程已结束")
         self.after(100, self.update_log)
 
     def log(self, msg):
         self.log_queue.put(msg)
-
-    def on_closing(self):
-        if self.running:
-            if messagebox.askyesno("确认", "下载正在进行中，确定退出吗？"):
-                if self.worker:
-                    self.worker.stop()
-                self.destroy()
-        else:
-            self.destroy()
 
 if __name__ == "__main__":
     app = DownloaderApp()

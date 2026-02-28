@@ -56,11 +56,6 @@ class DownloadWorker:
         self.total_chapters = 0
         self.completed = 0
         self.failed = 0
-        self.MAX_CONCURRENT = 3
-        self.MAX_RETRIES = 3
-        self.RETRY_DELAY_BASE = 2000
-        self.REQUEST_DELAY = 500
-        self.STORAGE_KEY_PREFIX = '275_downloaded_'
 
     def log(self, msg):
         self.log_queue.put(msg)
@@ -94,7 +89,7 @@ class DownloadWorker:
         if timeout is None:
             timeout = self.timeout
         if retries is None:
-            retries = self.MAX_RETRIES
+            retries = self.retry_times
         for attempt in range(retries):
             if self.stop_flag:
                 return None
@@ -108,12 +103,16 @@ class DownloadWorker:
                 resp = self.session.get(url, headers=headers, timeout=timeout)
                 resp.encoding = 'utf-8'
                 if resp.status_code == 200:
+                    if "您的操作太快了" in resp.text or "稍后再试" in resp.text:
+                        self.log("检测到访问频率过高，等待30秒后重试...")
+                        time.sleep(30)
+                        continue
                     return resp
                 else:
                     self.log(f"请求失败，状态码 {resp.status_code}，重试 {attempt+1}/{retries}")
             except Exception as e:
                 self.log(f"请求异常: {e}，重试 {attempt+1}/{retries}")
-            time.sleep((self.RETRY_DELAY_BASE * (2 ** attempt)) / 1000)
+            time.sleep(random.uniform(*self.request_delay) * 2)
         return None
 
     def get_album_title(self):
@@ -230,15 +229,15 @@ class DownloadWorker:
         if play_url in self.downloaded:
             self.completed += 1
             self.stats_log()
-            self.log(f"[{chap_num}] 已下载")
+            self.log(f"[{chap_num}] 已下载，计入完成")
             return True
         self.log(f"[{chap_num}] 开始处理：{chap_title}")
-        time.sleep(self.REQUEST_DELAY / 1000)
+        time.sleep(random.uniform(*self.request_delay))
         audio_url = self.get_audio_url(play_url)
         if not audio_url:
             self.failed += 1
             self.stats_log()
-            self.log(f"[{chap_num}] 获取音频URL失败")
+            self.log(f"[{chap_num}] 获取音频URL失败，跳过")
             self.fail_log(chap_num, chap_title)
             return False
         safe_title = self.sanitize_filename(chap_title)
@@ -268,8 +267,6 @@ class DownloadWorker:
         album_title = self.get_album_title()
         self.log(f"专辑标题：{album_title}")
         os.makedirs(download_dir, exist_ok=True)
-        self.downloaded_file = os.path.join(download_dir, '.downloaded.json')
-        self.load_downloaded()
         self.log(f"保存目录：{download_dir}")
         self.log("正在获取章节列表...")
         chapters = self.get_chapter_links()
@@ -280,7 +277,7 @@ class DownloadWorker:
         self.stats_log()
         self.log(f"共找到 {self.total_chapters} 个章节")
         self.failed_chapters = []
-        self.executor = ThreadPoolExecutor(max_workers=self.MAX_CONCURRENT)
+        self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
         future_to_chap = {
             self.executor.submit(self.process_chapter, chap, download_dir): chap
             for chap in chapters
@@ -324,6 +321,11 @@ class DownloaderApp(Tk):
         self.geometry("950x750")
         self.resizable(True, True)
         self.search_var = StringVar()
+        self.max_workers_var = IntVar(value=2)
+        self.delay_min_var = DoubleVar(value=1.0)
+        self.delay_max_var = DoubleVar(value=3.0)
+        self.retry_var = IntVar(value=3)
+        self.timeout_var = IntVar(value=15)
         self.save_path_var = StringVar()
         self.selected_book_url = None
         self.selected_book_title = None
@@ -361,6 +363,19 @@ class DownloaderApp(Tk):
         scrollbar.pack(side=RIGHT, fill=Y)
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.bind('<<TreeviewSelect>>', self.on_select)
+
+        config_frame = Frame(main_frame)
+        config_frame.pack(fill=X, pady=5)
+        Label(config_frame, text="并发数：").pack(side=LEFT)
+        Spinbox(config_frame, from_=1, to=20, textvariable=self.max_workers_var, width=4).pack(side=LEFT, padx=2)
+        Label(config_frame, text="重试：").pack(side=LEFT, padx=(10,0))
+        Spinbox(config_frame, from_=0, to=10, textvariable=self.retry_var, width=4).pack(side=LEFT, padx=2)
+        Label(config_frame, text="超时：").pack(side=LEFT, padx=(10,0))
+        Spinbox(config_frame, from_=5, to=60, textvariable=self.timeout_var, width=4).pack(side=LEFT, padx=2)
+        Label(config_frame, text="延迟范围：").pack(side=LEFT, padx=(10,0))
+        Entry(config_frame, textvariable=self.delay_min_var, width=4).pack(side=LEFT)
+        Label(config_frame, text="-").pack(side=LEFT)
+        Entry(config_frame, textvariable=self.delay_max_var, width=4).pack(side=LEFT)
 
         dir_frame = Frame(main_frame)
         dir_frame.pack(fill=X, pady=5)
@@ -479,10 +494,10 @@ class DownloaderApp(Tk):
         book_dir = os.path.join(save_dir, self.selected_book_title)
         self.worker = DownloadWorker(
             album_url=self.selected_book_url,
-            max_workers=3,
-            request_delay=500,
-            retry_times=3,
-            timeout=15,
+            max_workers=self.max_workers_var.get(),
+            request_delay=(self.delay_min_var.get(), self.delay_max_var.get()),
+            retry_times=self.retry_var.get(),
+            timeout=self.timeout_var.get(),
             save_dir=book_dir,
             log_queue=self.log_queue
         )
@@ -541,9 +556,8 @@ class DownloaderApp(Tk):
                         self.completed_label.config(text=str(completed))
                         self.failed_label.config(text=str(failed))
                         self.total_label.config(text=str(total))
-                        done = completed
                         if total > 0:
-                            percent = (done / total) * 100
+                            percent = (completed / total) * 100
                             self.progress['value'] = percent
                 else:
                     self.log_text.insert(END, msg + "\n")

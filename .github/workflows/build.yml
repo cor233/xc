@@ -24,10 +24,10 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        pyinstaller --onefile --windowed --name 有声小说下载器 downloader_gui.py
+        pyinstaller --onefile --windowed --name 1 downloader_gui.py
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: 有声小说下载器
-        path: dist/有声小说下载器.exe
+        name: 1
+        path: dist/1.exe

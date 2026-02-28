@@ -321,7 +321,7 @@ class DownloaderApp(Tk):
         self.geometry("950x800")
         self.resizable(True, True)
         self.search_var = StringVar()
-        self.max_workers_var = IntVar(value=2)
+        self.max_workers_var = IntVar(value=3)
         self.delay_min_var = DoubleVar(value=1.0)
         self.delay_max_var = DoubleVar(value=3.0)
         self.retry_var = IntVar(value=3)

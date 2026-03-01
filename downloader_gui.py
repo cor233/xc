@@ -34,8 +34,6 @@ class DownloadWorker:
         self.save_dir = save_dir
         self.log_queue = log_queue
         self.stop_flag = False
-        self.pause_flag = False
-        self.pause_cond = threading.Condition()
         self.session = requests.Session()
         self.session.headers.update({
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
@@ -51,13 +49,13 @@ class DownloadWorker:
         })
         self.completed_file = os.path.join(save_dir, '.completed.json')
         self.failed_file = os.path.join(save_dir, '.failed.json')
+        self.file_lock = threading.Lock()
         self.load_completed()
         self.load_failed()
         self.executor = None
         self.total_chapters = 0
         self.completed = 0
         self.failed = 0
-        self.failed_chapters = []
 
     def log(self, msg):
         self.log_queue.put(msg)
@@ -79,8 +77,9 @@ class DownloadWorker:
             self.completed_set = set()
 
     def save_completed(self):
-        with open(self.completed_file, 'w', encoding='utf-8') as f:
-            json.dump(list(self.completed_set), f, ensure_ascii=False)
+        with self.file_lock:
+            with open(self.completed_file, 'w', encoding='utf-8') as f:
+                json.dump(list(self.completed_set), f, ensure_ascii=False)
 
     def load_failed(self):
         if os.path.exists(self.failed_file):
@@ -90,13 +89,9 @@ class DownloadWorker:
             self.failed_set = set()
 
     def save_failed(self):
-        with open(self.failed_file, 'w', encoding='utf-8') as f:
-            json.dump(list(self.failed_set), f, ensure_ascii=False)
-
-    def check_pause(self):
-        with self.pause_cond:
-            while self.pause_flag and not self.stop_flag:
-                self.pause_cond.wait()
+        with self.file_lock:
+            with open(self.failed_file, 'w', encoding='utf-8') as f:
+                json.dump(list(self.failed_set), f, ensure_ascii=False)
 
     def fetch_url(self, url, referer=None, timeout=None, retries=None):
         if timeout is None:
@@ -106,7 +101,6 @@ class DownloadWorker:
         for attempt in range(retries):
             if self.stop_flag:
                 return None
-            self.check_pause()
             try:
                 headers = {'User-Agent': random.choice(USER_AGENTS)}
                 if referer:
@@ -218,7 +212,6 @@ class DownloadWorker:
                         for chunk in r.iter_content(chunk_size=8192):
                             if self.stop_flag:
                                 return False
-                            self.check_pause()
                             f.write(chunk)
                     return True
                 else:
@@ -303,7 +296,6 @@ class DownloadWorker:
             chapters = all_chapters
             self.log(f"首次下载，共 {len(chapters)} 个章节")
         self.stats_log()
-        self.failed_chapters = []
         self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
         future_to_chap = {
             self.executor.submit(self.process_chapter, chap, download_dir): chap
@@ -313,13 +305,11 @@ class DownloadWorker:
             for future in as_completed(future_to_chap):
                 if self.stop_flag:
                     break
-                self.check_pause()
                 chap = future_to_chap[future]
                 try:
                     future.result()
                 except Exception as e:
                     self.log(f"[{chap['num']}] 处理异常: {e}")
-                    self.failed_chapters.append(chap)
         finally:
             if self.stop_flag:
                 self.executor.shutdown(wait=False, cancel_futures=True)
@@ -418,10 +408,8 @@ class DownloaderApp(Tk):
 
         ctrl_frame = Frame(main_frame)
         ctrl_frame.pack(fill=X, pady=5)
-        self.start_btn = Button(ctrl_frame, text="开始下载", command=self.start_or_resume, bg="green", fg="white", width=12)
+        self.start_btn = Button(ctrl_frame, text="开始下载", command=self.start_download, bg="green", fg="white", width=12)
         self.start_btn.pack(side=LEFT, padx=2)
-        self.pause_btn = Button(ctrl_frame, text="暂停", command=self.pause_download, bg="orange", fg="white", width=8, state=DISABLED)
-        self.pause_btn.pack(side=LEFT, padx=2)
         self.stop_btn = Button(ctrl_frame, text="停止", command=self.stop_download, state=DISABLED, bg="red", fg="white", width=8)
         self.stop_btn.pack(side=LEFT, padx=2)
 
@@ -503,12 +491,9 @@ class DownloaderApp(Tk):
         }
         return re.sub(r'[\\/:*?"<>|]', lambda m: map[m.group(0)], name).strip()
 
-    def start_or_resume(self):
+    def start_download(self):
         if self.running:
-            if self.worker and self.worker.pause_flag:
-                self.resume_download()
-            else:
-                messagebox.showwarning("提示", "下载正在进行中")
+            messagebox.showwarning("提示", "下载正在进行中")
             return
         if not self.selected_book_url:
             messagebox.showerror("错误", "请先在搜索结果中选择一本小说")
@@ -525,7 +510,6 @@ class DownloaderApp(Tk):
         self.auto_loop_active = True
         self.running = True
         self.start_btn.config(state=DISABLED)
-        self.pause_btn.config(state=NORMAL)
         self.stop_btn.config(state=NORMAL)
         self.fail_text.delete(1.0, END)
         self.auto_loop_thread = threading.Thread(target=self.auto_loop)
@@ -557,31 +541,14 @@ class DownloaderApp(Tk):
         self.auto_loop_active = False
         self.running = False
         self.start_btn.config(state=NORMAL)
-        self.pause_btn.config(state=DISABLED)
         self.stop_btn.config(state=DISABLED)
-
-    def pause_download(self):
-        if self.worker:
-            self.worker.pause()
-            self.pause_btn.config(state=DISABLED)
-            self.start_btn.config(state=NORMAL)
-            self.log("下载已暂停")
-
-    def resume_download(self):
-        if self.worker:
-            self.worker.resume()
-            self.pause_btn.config(state=NORMAL)
-            self.start_btn.config(state=DISABLED)
-            self.log("下载已继续")
 
     def stop_download(self):
         if self.worker:
             self.worker.stop_flag = True
-            self.worker.resume()
         self.auto_loop_active = False
         self.running = False
         self.start_btn.config(state=NORMAL)
-        self.pause_btn.config(state=DISABLED)
         self.stop_btn.config(state=DISABLED)
         self.log("用户请求停止...")
 

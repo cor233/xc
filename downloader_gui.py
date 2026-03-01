@@ -416,11 +416,6 @@ class DownloaderApp(Tk):
         self.total_label = Label(stats_frame, text="0", font=("Arial", 10, "bold"))
         self.total_label.pack(side=LEFT)
 
-        progress_frame = Frame(main_frame)
-        progress_frame.pack(fill=X, pady=5)
-        self.progress = ttk.Progressbar(progress_frame, orient=HORIZONTAL, length=100, mode='determinate')
-        self.progress.pack(fill=X, expand=True)
-
         ctrl_frame = Frame(main_frame)
         ctrl_frame.pack(fill=X, pady=5)
         self.start_btn = Button(ctrl_frame, text="开始下载", command=self.start_or_resume, bg="green", fg="white", width=12)
@@ -610,9 +605,6 @@ class DownloaderApp(Tk):
                         self.completed_label.config(text=str(completed))
                         self.failed_label.config(text=str(failed))
                         self.total_label.config(text=str(total))
-                        if total > 0:
-                            percent = (completed / total) * 100
-                            self.progress['value'] = percent
                 else:
                     self.log_text.insert(END, msg + "\n")
                     self.log_text.see(END)

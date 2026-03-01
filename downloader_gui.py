@@ -49,13 +49,15 @@ class DownloadWorker:
             "Sec-Fetch-User": "?1",
             "Cache-Control": "max-age=0",
         })
-        self.downloaded_file = os.path.join(save_dir, '.downloaded.json')
-        self.load_downloaded()
+        self.completed_file = os.path.join(save_dir, '.completed.json')
+        self.failed_file = os.path.join(save_dir, '.failed.json')
+        self.load_completed()
+        self.load_failed()
         self.executor = None
-        self.failed_chapters = []
         self.total_chapters = 0
         self.completed = 0
         self.failed = 0
+        self.failed_chapters = []
 
     def log(self, msg):
         self.log_queue.put(msg)
@@ -69,16 +71,27 @@ class DownloadWorker:
     def clear_fail_log(self):
         self.log_queue.put("FAIL_CLEAR")
 
-    def load_downloaded(self):
-        if os.path.exists(self.downloaded_file):
-            with open(self.downloaded_file, 'r', encoding='utf-8') as f:
-                self.downloaded = set(json.load(f))
+    def load_completed(self):
+        if os.path.exists(self.completed_file):
+            with open(self.completed_file, 'r', encoding='utf-8') as f:
+                self.completed_set = set(json.load(f))
         else:
-            self.downloaded = set()
+            self.completed_set = set()
 
-    def save_downloaded(self):
-        with open(self.downloaded_file, 'w', encoding='utf-8') as f:
-            json.dump(list(self.downloaded), f, ensure_ascii=False)
+    def save_completed(self):
+        with open(self.completed_file, 'w', encoding='utf-8') as f:
+            json.dump(list(self.completed_set), f, ensure_ascii=False)
+
+    def load_failed(self):
+        if os.path.exists(self.failed_file):
+            with open(self.failed_file, 'r', encoding='utf-8') as f:
+                self.failed_set = set(json.load(f))
+        else:
+            self.failed_set = set()
+
+    def save_failed(self):
+        with open(self.failed_file, 'w', encoding='utf-8') as f:
+            json.dump(list(self.failed_set), f, ensure_ascii=False)
 
     def check_pause(self):
         with self.pause_cond:
@@ -226,16 +239,18 @@ class DownloadWorker:
         chap_num = chapter['num']
         chap_title = chapter['title']
         play_url = chapter['url']
-        if play_url in self.downloaded:
+        if play_url in self.completed_set:
             self.completed += 1
             self.stats_log()
-            self.log(f"[{chap_num}] 已下载，计入完成")
+            self.log(f"[{chap_num}] 已完成，计入完成")
             return True
         self.log(f"[{chap_num}] 开始处理：{chap_title}")
         time.sleep(random.uniform(*self.request_delay))
         audio_url = self.get_audio_url(play_url)
         if not audio_url:
             self.failed += 1
+            self.failed_set.add(play_url)
+            self.save_failed()
             self.stats_log()
             self.log(f"[{chap_num}] 获取音频URL失败，跳过")
             self.fail_log(chap_num, chap_title)
@@ -245,14 +260,19 @@ class DownloadWorker:
         filepath = os.path.join(download_dir, filename)
         success = self.download_audio(audio_url, filepath)
         if success:
-            self.downloaded.add(play_url)
-            self.save_downloaded()
+            self.completed_set.add(play_url)
+            self.save_completed()
+            if play_url in self.failed_set:
+                self.failed_set.remove(play_url)
+                self.save_failed()
             self.completed += 1
             self.stats_log()
             self.log(f"[{chap_num}] 下载完成 -> {filename}")
             return True
         else:
             self.failed += 1
+            self.failed_set.add(play_url)
+            self.save_failed()
             self.stats_log()
             self.log(f"[{chap_num}] 下载失败")
             self.fail_log(chap_num, chap_title)
@@ -262,6 +282,8 @@ class DownloadWorker:
         self.clear_fail_log()
         self.completed = 0
         self.failed = 0
+        self.load_completed()
+        self.load_failed()
         self.log("开始获取专辑信息...")
         self.fetch_url("https://m.i275.com/", referer="https://m.i275.com/")
         album_title = self.get_album_title()
@@ -269,13 +291,18 @@ class DownloadWorker:
         os.makedirs(download_dir, exist_ok=True)
         self.log(f"保存目录：{download_dir}")
         self.log("正在获取章节列表...")
-        chapters = self.get_chapter_links()
-        if not chapters:
+        all_chapters = self.get_chapter_links()
+        if not all_chapters:
             self.log("未找到任何章节，请检查URL或网络。")
             return
-        self.total_chapters = len(chapters)
+        self.total_chapters = len(all_chapters)
+        if self.failed_set:
+            chapters = [c for c in all_chapters if c['url'] in self.failed_set]
+            self.log(f"发现失败记录，本次将重试 {len(chapters)} 个章节")
+        else:
+            chapters = all_chapters
+            self.log(f"首次下载，共 {len(chapters)} 个章节")
         self.stats_log()
-        self.log(f"共找到 {self.total_chapters} 个章节")
         self.failed_chapters = []
         self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
         future_to_chap = {
@@ -299,20 +326,11 @@ class DownloadWorker:
             else:
                 self.executor.shutdown(wait=True)
         if not self.stop_flag:
-            self.log(f"下载完成！成功 {self.completed} 失败 {self.failed}")
-            if self.failed_chapters:
-                self.log(f"失败 {len(self.failed_chapters)} 章")
+            self.log(f"本轮下载完成！成功 {self.completed} 失败 {self.failed}")
+            if self.failed_set:
+                self.log(f"仍有 {len(self.failed_set)} 章失败，将继续重试")
         else:
             self.log("下载已停止")
-
-    def pause(self):
-        with self.pause_cond:
-            self.pause_flag = True
-
-    def resume(self):
-        with self.pause_cond:
-            self.pause_flag = False
-            self.pause_cond.notify_all()
 
 class DownloaderApp(Tk):
     def __init__(self):
@@ -333,8 +351,8 @@ class DownloaderApp(Tk):
         self.worker_thread = None
         self.worker = None
         self.running = False
-        self.auto_mode = False
-        self.auto_thread = None
+        self.auto_loop_active = False
+        self.auto_loop_thread = None
         self.create_widgets()
         self.update_log()
 
@@ -406,8 +424,6 @@ class DownloaderApp(Tk):
         ctrl_frame.pack(fill=X, pady=5)
         self.start_btn = Button(ctrl_frame, text="开始下载", command=self.start_or_resume, bg="green", fg="white", width=12)
         self.start_btn.pack(side=LEFT, padx=2)
-        self.auto_btn = Button(ctrl_frame, text="自动下载", command=self.start_auto, bg="purple", fg="white", width=12)
-        self.auto_btn.pack(side=LEFT, padx=2)
         self.pause_btn = Button(ctrl_frame, text="暂停", command=self.pause_download, bg="orange", fg="white", width=8, state=DISABLED)
         self.pause_btn.pack(side=LEFT, padx=2)
         self.stop_btn = Button(ctrl_frame, text="停止", command=self.stop_download, state=DISABLED, bg="red", fg="white", width=8)
@@ -496,78 +512,42 @@ class DownloaderApp(Tk):
         if not save_dir:
             save_dir = os.getcwd()
             self.save_path_var.set(save_dir)
-        book_dir = os.path.join(save_dir, self.selected_book_title)
-        self.worker = DownloadWorker(
-            album_url=self.selected_book_url,
-            max_workers=self.max_workers_var.get(),
-            request_delay=(self.delay_min_var.get(), self.delay_max_var.get()),
-            retry_times=self.retry_var.get(),
-            timeout=self.timeout_var.get(),
-            save_dir=book_dir,
-            log_queue=self.log_queue
-        )
+        self.book_dir = os.path.join(save_dir, self.selected_book_title)
+        self.auto_loop_active = True
         self.running = True
         self.start_btn.config(state=DISABLED)
-        self.auto_btn.config(state=DISABLED)
         self.pause_btn.config(state=NORMAL)
         self.stop_btn.config(state=NORMAL)
         self.fail_text.delete(1.0, END)
-        self.worker_thread = threading.Thread(target=self.worker.start_download, args=(book_dir,))
-        self.worker_thread.daemon = True
-        self.worker_thread.start()
-
-    def start_auto(self):
-        if self.running:
-            if self.worker and self.worker.pause_flag:
-                self.resume_download()
-                return
-            else:
-                messagebox.showwarning("提示", "已有任务在运行")
-                return
-        if not self.selected_book_url:
-            messagebox.showerror("错误", "请先在搜索结果中选择一本小说")
-            return
-        self.auto_mode = True
-        self.running = True
-        self.start_btn.config(state=DISABLED)
-        self.auto_btn.config(state=DISABLED)
-        self.pause_btn.config(state=NORMAL)
-        self.stop_btn.config(state=NORMAL)
-        self.fail_text.delete(1.0, END)
-        self.auto_thread = threading.Thread(target=self.auto_loop)
-        self.auto_thread.daemon = True
-        self.auto_thread.start()
+        self.auto_loop_thread = threading.Thread(target=self.auto_loop)
+        self.auto_loop_thread.daemon = True
+        self.auto_loop_thread.start()
 
     def auto_loop(self):
-        while self.auto_mode and not self.worker or (self.worker and not self.worker.stop_flag):
-            save_dir = self.save_path_var.get().strip()
-            if not save_dir:
-                save_dir = os.getcwd()
-            book_dir = os.path.join(save_dir, self.selected_book_title)
+        while self.auto_loop_active:
             self.worker = DownloadWorker(
                 album_url=self.selected_book_url,
                 max_workers=self.max_workers_var.get(),
                 request_delay=(self.delay_min_var.get(), self.delay_max_var.get()),
                 retry_times=self.retry_var.get(),
                 timeout=self.timeout_var.get(),
-                save_dir=book_dir,
+                save_dir=self.book_dir,
                 log_queue=self.log_queue
             )
-            self.worker_thread = threading.Thread(target=self.worker.start_download, args=(book_dir,))
+            self.worker_thread = threading.Thread(target=self.worker.start_download, args=(self.book_dir,))
             self.worker_thread.daemon = True
             self.worker_thread.start()
             self.worker_thread.join()
-            if not self.auto_mode or self.worker.stop_flag:
+            if not self.auto_loop_active or self.worker.stop_flag:
                 break
-            if not self.worker.failed_chapters:
-                self.log("自动下载：所有章节已完成")
+            if not self.worker.failed_set:
+                self.log("全部章节下载完成")
                 break
-            self.log(f"自动下载：还有 {len(self.worker.failed_chapters)} 章失败，继续重试")
-            time.sleep(2)
-        self.auto_mode = False
+            self.log(f"仍有 {len(self.worker.failed_set)} 章失败，10秒后继续重试")
+            time.sleep(10)
+        self.auto_loop_active = False
         self.running = False
         self.start_btn.config(state=NORMAL)
-        self.auto_btn.config(state=NORMAL)
         self.pause_btn.config(state=DISABLED)
         self.stop_btn.config(state=DISABLED)
 
@@ -576,7 +556,6 @@ class DownloaderApp(Tk):
             self.worker.pause()
             self.pause_btn.config(state=DISABLED)
             self.start_btn.config(state=NORMAL)
-            self.auto_btn.config(state=NORMAL)
             self.log("下载已暂停")
 
     def resume_download(self):
@@ -584,17 +563,15 @@ class DownloaderApp(Tk):
             self.worker.resume()
             self.pause_btn.config(state=NORMAL)
             self.start_btn.config(state=DISABLED)
-            self.auto_btn.config(state=DISABLED)
             self.log("下载已继续")
 
     def stop_download(self):
         if self.worker:
             self.worker.stop_flag = True
             self.worker.resume()
-        self.auto_mode = False
+        self.auto_loop_active = False
         self.running = False
         self.start_btn.config(state=NORMAL)
-        self.auto_btn.config(state=NORMAL)
         self.pause_btn.config(state=DISABLED)
         self.stop_btn.config(state=DISABLED)
         self.log("用户请求停止...")
@@ -627,14 +604,6 @@ class DownloaderApp(Tk):
                     self.log_text.see(END)
             except queue.Empty:
                 break
-        if self.worker_thread and not self.worker_thread.is_alive():
-            if self.running and not self.auto_mode:
-                self.running = False
-                self.start_btn.config(state=NORMAL)
-                self.auto_btn.config(state=NORMAL)
-                self.pause_btn.config(state=DISABLED)
-                self.stop_btn.config(state=DISABLED)
-                self.log("下载线程已结束")
         self.after(100, self.update_log)
 
     def log(self, msg):

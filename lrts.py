@@ -147,6 +147,7 @@ class DownloadWorker:
     def get_all_chapters(self):
         resp = self.fetch_url(self.album_url)
         if not resp:
+            self.log("无法获取专辑详情页")
             return []
         soup = BeautifulSoup(resp.text, 'html.parser')
         total_span = soup.find('span', string=re.compile(r'章节：(\d+)'))
@@ -162,7 +163,7 @@ class DownloadWorker:
                 if match:
                     total_chapters = int(match.group(1))
         if total_chapters == 0:
-            self.log("无法获取总章节数，尝试解析第一页")
+            self.log("警告：无法从页面解析总章节数，将尝试使用默认分页")
         resource_id = None
         script = soup.find('script', text=re.compile(r'resourcesid=(\d+)'))
         if script:
@@ -177,8 +178,9 @@ class DownloadWorker:
                 if match:
                     resource_id = match.group(1)
         if not resource_id:
-            self.log("未找到资源ID")
+            self.log("错误：未找到资源ID，无法获取章节列表")
             return []
+        self.log(f"资源ID：{resource_id}，总章节数：{total_chapters}")
         page_size = 10
         total_pages = (total_chapters + page_size - 1) // page_size if total_chapters else 1
         all_chapters = []
@@ -186,13 +188,18 @@ class DownloadWorker:
             if self.stop_flag:
                 break
             ajax_url = f"https://www.lrts.me/ajax/book/{resource_id}/{page+1}/{page_size}"
+            self.log(f"正在获取第 {page+1} 页章节...")
             resp = self.fetch_url(ajax_url, referer=self.album_url)
             if not resp:
+                self.log(f"获取第 {page+1} 页失败")
                 continue
             try:
                 data = resp.json()
                 if data.get('status') == 'success':
                     items = data['data']['data']
+                    if not items:
+                        self.log(f"第 {page+1} 页无数据")
+                        continue
                     for item in items:
                         chap_num = item.get('section')
                         chap_title = item.get('resName')
@@ -202,12 +209,14 @@ class DownloadWorker:
                             'title': chap_title,
                             'url': chap_url
                         })
+                    self.log(f"第 {page+1} 页获取到 {len(items)} 个章节")
                 else:
                     self.log(f"获取章节列表失败: {data.get('errMsg')}")
             except Exception as e:
                 self.log(f"解析章节列表异常: {e}")
             time.sleep(random.uniform(*self.request_delay))
         all_chapters.sort(key=lambda x: x['num'])
+        self.log(f"总共获取到 {len(all_chapters)} 个章节")
         return all_chapters
 
     def get_audio_url(self, play_url):
@@ -323,7 +332,7 @@ class DownloadWorker:
         self.log("正在获取章节列表...")
         all_chapters = self.get_all_chapters()
         if not all_chapters:
-            self.log("未找到任何章节，请检查URL或网络。")
+            self.log("错误：未获取到任何章节，请检查网络或页面结构。")
             return
         self.total_chapters = len(all_chapters)
         if self.failed_set:

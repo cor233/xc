@@ -38,7 +38,7 @@ HEADERS_TEMPLATE = {
 }
 
 class DownloadWorker:
-    def __init__(self, album_url, max_workers, request_delay, retry_times, timeout, save_dir, log_queue):
+    def __init__(self, album_url, max_workers, request_delay, retry_times, timeout, save_dir, log_queue, cookie):
         self.album_url = album_url
         self.max_workers = max_workers
         self.request_delay = request_delay
@@ -47,8 +47,11 @@ class DownloadWorker:
         self.save_dir = save_dir
         self.log_queue = log_queue
         self.stop_flag = False
+        self.cookie = cookie
         self.session = requests.Session()
         self.session.headers.update(HEADERS_TEMPLATE)
+        if self.cookie:
+            self.session.headers.update({"Cookie": self.cookie})
         self.completed_file = os.path.join(save_dir, '.completed.json')
         self.failed_file = os.path.join(save_dir, '.failed.json')
         self.file_lock = threading.Lock()
@@ -212,6 +215,8 @@ class DownloadWorker:
                     self.log(f"第 {page+1} 页获取到 {len(items)} 个章节")
                 else:
                     self.log(f"获取章节列表失败: {data.get('errMsg')}")
+                    if "请先登录" in data.get('errMsg', '') or "需要登录" in data.get('errMsg', ''):
+                        self.log("提示：可能需要登录Cookie")
             except Exception as e:
                 self.log(f"解析章节列表异常: {e}")
             time.sleep(random.uniform(*self.request_delay))
@@ -332,7 +337,7 @@ class DownloadWorker:
         self.log("正在获取章节列表...")
         all_chapters = self.get_all_chapters()
         if not all_chapters:
-            self.log("错误：未获取到任何章节，请检查网络或页面结构。")
+            self.log("错误：未获取到任何章节，可能书籍需要登录或Cookie无效")
             return
         self.total_chapters = len(all_chapters)
         if self.failed_set:
@@ -372,7 +377,7 @@ class DownloaderApp(Tk):
     def __init__(self):
         super().__init__()
         self.title("懒人听书下载器")
-        self.geometry("950x800")
+        self.geometry("950x850")
         self.resizable(True, True)
         self.search_var = StringVar()
         self.max_workers_var = IntVar(value=3)
@@ -381,6 +386,7 @@ class DownloaderApp(Tk):
         self.retry_var = IntVar(value=3)
         self.timeout_var = IntVar(value=15)
         self.save_path_var = StringVar()
+        self.cookie_var = StringVar()
         self.selected_book_url = None
         self.selected_book_title = None
         self.selected_book_announcer = None
@@ -420,6 +426,11 @@ class DownloaderApp(Tk):
         scrollbar.pack(side=RIGHT, fill=Y)
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.bind('<<TreeviewSelect>>', self.on_select)
+
+        cookie_frame = Frame(main_frame)
+        cookie_frame.pack(fill=X, pady=5)
+        Label(cookie_frame, text="Cookie：").pack(side=LEFT)
+        Entry(cookie_frame, textvariable=self.cookie_var, width=80).pack(side=LEFT, padx=5, expand=True, fill=X)
 
         config_frame = Frame(main_frame)
         config_frame.pack(fill=X, pady=5)
@@ -487,6 +498,8 @@ class DownloaderApp(Tk):
             headers = HEADERS_TEMPLATE.copy()
             headers['User-Agent'] = random.choice(USER_AGENTS)
             headers['Referer'] = 'https://www.lrts.me/'
+            if self.cookie_var.get().strip():
+                headers['Cookie'] = self.cookie_var.get().strip()
             resp = requests.get(search_url, headers=headers, timeout=15)
             resp.encoding = 'utf-8'
             if resp.status_code != 200:
@@ -575,7 +588,8 @@ class DownloaderApp(Tk):
                 retry_times=self.retry_var.get(),
                 timeout=self.timeout_var.get(),
                 save_dir=self.book_dir,
-                log_queue=self.log_queue
+                log_queue=self.log_queue,
+                cookie=self.cookie_var.get().strip()
             )
             self.worker_thread = threading.Thread(target=self.worker.start_download, args=(self.book_dir,))
             self.worker_thread.daemon = True

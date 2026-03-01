@@ -347,6 +347,7 @@ class DownloaderApp(Tk):
         self.save_path_var = StringVar()
         self.selected_book_url = None
         self.selected_book_title = None
+        self.selected_book_announcer = None
         self.log_queue = queue.Queue()
         self.worker_thread = None
         self.worker = None
@@ -494,9 +495,18 @@ class DownloaderApp(Tk):
         selected = self.tree.selection()
         if selected:
             item = selected[0]
+            values = self.tree.item(item, 'values')
             self.selected_book_url = self.tree.item(item, 'tags')[0]
-            self.selected_book_title = self.tree.item(item, 'tags')[1]
-            self.log(f"已选中：{self.selected_book_title}")
+            self.selected_book_title = values[0]
+            self.selected_book_announcer = values[1]
+            self.log(f"已选中：{self.selected_book_title} - {self.selected_book_announcer}")
+
+    def sanitize_filename(self, name):
+        map = {
+            '\\': '＼', '/': '／', ':': '：', '*': '＊',
+            '?': '？', '"': '＂', '<': '＜', '>': '＞', '|': '｜'
+        }
+        return re.sub(r'[\\/:*?"<>|]', lambda m: map[m.group(0)], name).strip()
 
     def start_or_resume(self):
         if self.running:
@@ -512,7 +522,11 @@ class DownloaderApp(Tk):
         if not save_dir:
             save_dir = os.getcwd()
             self.save_path_var.set(save_dir)
-        self.book_dir = os.path.join(save_dir, self.selected_book_title)
+        folder_name = self.selected_book_title
+        if self.selected_book_announcer and self.selected_book_announcer.strip():
+            folder_name = f"{self.selected_book_title}-{self.selected_book_announcer}"
+        safe_folder = self.sanitize_filename(folder_name)
+        self.book_dir = os.path.join(save_dir, safe_folder)
         self.auto_loop_active = True
         self.running = True
         self.start_btn.config(state=DISABLED)

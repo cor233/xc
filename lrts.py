@@ -24,6 +24,19 @@ USER_AGENTS = [
     "Mozilla/5.0 (iPad; CPU OS 17_1_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1"
 ]
 
+HEADERS_TEMPLATE = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
+
 class DownloadWorker:
     def __init__(self, album_url, max_workers, request_delay, retry_times, timeout, save_dir, log_queue):
         self.album_url = album_url
@@ -35,18 +48,7 @@ class DownloadWorker:
         self.log_queue = log_queue
         self.stop_flag = False
         self.session = requests.Session()
-        self.session.headers.update({
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
-        })
+        self.session.headers.update(HEADERS_TEMPLATE)
         self.completed_file = os.path.join(save_dir, '.completed.json')
         self.failed_file = os.path.join(save_dir, '.failed.json')
         self.file_lock = threading.Lock()
@@ -473,16 +475,22 @@ class DownloaderApp(Tk):
             self.tree.delete(item)
         search_url = f"https://www.lrts.me/search/book/{urllib.parse.quote(keyword)}"
         try:
-            headers = {"User-Agent": random.choice(USER_AGENTS)}
+            headers = HEADERS_TEMPLATE.copy()
+            headers['User-Agent'] = random.choice(USER_AGENTS)
+            headers['Referer'] = 'https://www.lrts.me/'
             resp = requests.get(search_url, headers=headers, timeout=15)
             resp.encoding = 'utf-8'
             if resp.status_code != 200:
                 self.log(f"搜索请求失败，状态码 {resp.status_code}")
                 return
+            if "没有找到相关内容" in resp.text or "未找到相关结果" in resp.text:
+                self.log("搜索结果为空")
+                return
             soup = BeautifulSoup(resp.text, 'html.parser')
-            items = soup.select('.search-result .book-item')
+            items = soup.find_all('li', class_='book-item')
             if not items:
-                self.log("未找到相关结果")
+                self.log("未解析到任何书籍条目，可能页面结构已变化")
+                self.log(f"响应片段：{resp.text[:500]}")
                 return
             index = 1
             for item in items:
@@ -492,10 +500,10 @@ class DownloaderApp(Tk):
                 book_url = "https://www.lrts.me" + link['href']
                 title_div = item.find('a', class_='book-item-name')
                 title = title_div.get_text(strip=True) if title_div else "未知书名"
-                info_spans = item.find_all('div', class_='book-item-info')
+                info_divs = item.find_all('div', class_='book-item-info')
                 announcer = ""
                 author = ""
-                for info in info_spans:
+                for info in info_divs:
                     text = info.get_text()
                     if "主播：" in text:
                         announcer = text.replace("主播：", "").strip()

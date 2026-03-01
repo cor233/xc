@@ -1,4 +1,4 @@
-name: Build EXE
+name: 构建i275
 
 on:
   push:
@@ -10,24 +10,24 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    - name: Checkout code
+    - name: 检出代码
       uses: actions/checkout@v4
 
-    - name: Setup Python
+    - name: 设置 Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
 
-    - name: Install dependencies
+    - name: 安装依赖
       run: |
         pip install requests beautifulsoup4 pyinstaller
 
-    - name: Build with PyInstaller
+    - name: 使用 PyInstaller 构建
       run: |
-        pyinstaller --onefile --windowed --name audiobook_downloader downloader_gui.py
+        pyinstaller --onefile --windowed --name i275 i275.py
 
-    - name: Upload artifact
+    - name: 上传构建产物
       uses: actions/upload-artifact@v4
       with:
-        name: audiobook-downloader
-        path: dist/audiobook_downloader.exe
+        name: i275.exe
+        path: dist/i275.exe

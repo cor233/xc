@@ -1,8 +1,6 @@
 name: 构建i275
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:

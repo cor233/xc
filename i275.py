@@ -11,8 +11,8 @@ from tkinter import *
 from tkinter import scrolledtext, messagebox, filedialog
 from tkinter import ttk
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import requests
 from bs4 import BeautifulSoup
+from curl_cffi import requests as curl_requests
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -20,8 +20,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPad; CPU OS 17_1_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1"
 ]
 
 class DownloadWorker:
@@ -34,22 +32,9 @@ class DownloadWorker:
         self.save_dir = save_dir
         self.log_queue = log_queue
         self.stop_flag = False
-        self.session = requests.Session()
-        self.session.headers.update({
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
-        })
+        self.curl_session = curl_requests.Session()
         self.completed_file = os.path.join(save_dir, '.completed.json')
         self.failed_file = os.path.join(save_dir, '.failed.json')
-        self.file_lock = threading.Lock()
         self.load_completed()
         self.load_failed()
         self.executor = None
@@ -77,9 +62,8 @@ class DownloadWorker:
             self.completed_set = set()
 
     def save_completed(self):
-        with self.file_lock:
-            with open(self.completed_file, 'w', encoding='utf-8') as f:
-                json.dump(list(self.completed_set), f, ensure_ascii=False)
+        with open(self.completed_file, 'w', encoding='utf-8') as f:
+            json.dump(list(self.completed_set), f, ensure_ascii=False)
 
     def load_failed(self):
         if os.path.exists(self.failed_file):
@@ -89,9 +73,8 @@ class DownloadWorker:
             self.failed_set = set()
 
     def save_failed(self):
-        with self.file_lock:
-            with open(self.failed_file, 'w', encoding='utf-8') as f:
-                json.dump(list(self.failed_set), f, ensure_ascii=False)
+        with open(self.failed_file, 'w', encoding='utf-8') as f:
+            json.dump(list(self.failed_set), f, ensure_ascii=False)
 
     def fetch_url(self, url, referer=None, timeout=None, retries=None):
         if timeout is None:
@@ -107,12 +90,13 @@ class DownloadWorker:
                     headers['Referer'] = referer
                 else:
                     headers['Referer'] = self.album_url
-                resp = self.session.get(url, headers=headers, timeout=timeout)
+                resp = self.curl_session.get(url, headers=headers, timeout=timeout, impersonate="chrome120")
                 resp.encoding = 'utf-8'
                 if resp.status_code == 200:
                     if "您的操作太快了" in resp.text or "稍后再试" in resp.text:
-                        self.log("检测到访问频率过高，等待30秒后重试...")
-                        time.sleep(30)
+                        wait_time = random.randint(30, 60)
+                        self.log(f"检测到访问频率过高，等待{wait_time}秒后重试...")
+                        time.sleep(wait_time)
                         continue
                     return resp
                 else:
@@ -145,7 +129,7 @@ class DownloadWorker:
         chapter_links = []
         for a in soup.find_all('a', href=re.compile(r'^/play/\d+/\d+\.html')):
             href = a.get('href')
-            full_url = requests.compat.urljoin(self.album_url, href)
+            full_url = urllib.parse.urljoin(self.album_url, href)
             a_id = a.get('id', '')
             chap_num = 0
             if a_id and a_id.startswith('chapter-pos-'):
@@ -206,7 +190,7 @@ class DownloadWorker:
     def download_audio(self, audio_url, save_path):
         try:
             headers = {'User-Agent': random.choice(USER_AGENTS), 'Referer': self.album_url}
-            with self.session.get(audio_url, headers=headers, stream=True, timeout=self.timeout) as r:
+            with self.curl_session.get(audio_url, headers=headers, stream=True, timeout=self.timeout, impersonate="chrome120") as r:
                 if r.status_code == 200:
                     with open(save_path, 'wb') as f:
                         for chunk in r.iter_content(chunk_size=8192):
@@ -236,7 +220,7 @@ class DownloadWorker:
             self.completed += 1
             self.stats_log()
             self.log(f"[{chap_num}] 已完成，计入完成")
-            return True
+            return
         self.log(f"[{chap_num}] 开始处理：{chap_title}")
         time.sleep(random.uniform(*self.request_delay))
         audio_url = self.get_audio_url(play_url)
@@ -247,7 +231,7 @@ class DownloadWorker:
             self.stats_log()
             self.log(f"[{chap_num}] 获取音频URL失败，跳过")
             self.fail_log(chap_num, chap_title)
-            return False
+            return
         safe_title = self.sanitize_filename(chap_title)
         filename = f"{safe_title}.m4a"
         filepath = os.path.join(download_dir, filename)
@@ -261,7 +245,6 @@ class DownloadWorker:
             self.completed += 1
             self.stats_log()
             self.log(f"[{chap_num}] 下载完成 -> {filename}")
-            return True
         else:
             self.failed += 1
             self.failed_set.add(play_url)
@@ -269,7 +252,6 @@ class DownloadWorker:
             self.stats_log()
             self.log(f"[{chap_num}] 下载失败")
             self.fail_log(chap_num, chap_title)
-            return False
 
     def start_download(self, download_dir):
         self.clear_fail_log()
@@ -310,6 +292,8 @@ class DownloadWorker:
                     future.result()
                 except Exception as e:
                     self.log(f"[{chap['num']}] 处理异常: {e}")
+                    self.failed_set.add(chap['url'])
+                    self.save_failed()
         finally:
             if self.stop_flag:
                 self.executor.shutdown(wait=False, cancel_futures=True)
@@ -438,8 +422,8 @@ class DownloaderApp(Tk):
             self.tree.delete(item)
         search_url = f"https://m.i275.com/search.php?q={urllib.parse.quote(keyword)}"
         try:
-            headers = {"User-Agent": random.choice(USER_AGENTS)}
-            resp = requests.get(search_url, headers=headers, timeout=15)
+            headers = {'User-Agent': random.choice(USER_AGENTS)}
+            resp = curl_requests.get(search_url, headers=headers, timeout=15, impersonate="chrome120")
             resp.encoding = 'utf-8'
             if resp.status_code != 200:
                 self.log(f"搜索请求失败，状态码 {resp.status_code}")
@@ -452,7 +436,7 @@ class DownloaderApp(Tk):
             index = 1
             for a in items:
                 href = a.get('href')
-                book_url = requests.compat.urljoin("https://m.i275.com/", href)
+                book_url = urllib.parse.urljoin("https://m.i275.com/", href)
                 title_div = a.find('h3') or a.find('div', class_='font-medium')
                 if not title_div:
                     continue

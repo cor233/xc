@@ -24,7 +24,7 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        pyinstaller --onefile --windowed --name audiobook_downloader downloader_gui.py
+        pyinstaller --onefile --windowed --name audiobook_downloader i275.py
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4

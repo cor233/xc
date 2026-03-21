@@ -43,6 +43,17 @@ def extract_nuxt_json(html):
     json_str = json_str.replace('&quot;', '"').replace('&#39;', "'").replace('&amp;', '&')
     return json.loads(json_str)
 
+def resolve_refs(data, root):
+    """递归解析整数引用，将整数索引替换为 root[index]"""
+    if isinstance(data, list):
+        return [resolve_refs(item, root) for item in data]
+    elif isinstance(data, dict):
+        return {k: resolve_refs(v, root) for k, v in data.items()}
+    elif isinstance(data, int) and 0 <= data < len(root):
+        return resolve_refs(root[data], root)
+    else:
+        return data
+
 def find_value_by_key(nuxt_data, target_key):
     def _search(obj):
         if isinstance(obj, dict):
@@ -65,12 +76,23 @@ def search(keyword):
     params = {"keyword": keyword, "page": 1}
     html = request_get(url, params).text
     nuxt_data = extract_nuxt_json(html)
-    search_res = find_value_by_key(nuxt_data, "searchResults")
+    # 确保 nuxt_data 是列表，用于解析引用
+    if not isinstance(nuxt_data, list):
+        nuxt_data = [nuxt_data]
+    # 先解析整个数据中的引用
+    resolved = resolve_refs(nuxt_data, nuxt_data)
+    search_res = find_value_by_key(resolved, "searchResults")
     if not search_res:
         raise Exception("searchResults not found")
-    album_list = search_res.get("list", [])
+    if isinstance(search_res, dict):
+        album_list = search_res.get("list", [])
+    else:
+        album_list = search_res if isinstance(search_res, list) else []
     results = []
     for item in album_list:
+        # 如果 item 是整数，再次解析
+        if isinstance(item, int):
+            item = resolved[item] if item < len(resolved) else {}
         results.append({
             "id": item.get("id"),
             "title": item.get("title", ""),
@@ -86,10 +108,13 @@ def get_album_chapters(album_id):
     url = urljoin(BASE_URL, f"/albums/{album_id}")
     html = request_get(url).text
     nuxt_data = extract_nuxt_json(html)
+    if not isinstance(nuxt_data, list):
+        nuxt_data = [nuxt_data]
+    resolved = resolve_refs(nuxt_data, nuxt_data)
     chapters_key = f"album-chapters-{album_id}"
-    chapters_data = find_value_by_key(nuxt_data, chapters_key)
+    chapters_data = find_value_by_key(resolved, chapters_key)
     if not chapters_data:
-        chapters_data = find_value_by_key(nuxt_data, "chapters")
+        chapters_data = find_value_by_key(resolved, "chapters")
     if not chapters_data:
         raise Exception("chapters data not found")
     if isinstance(chapters_data, dict) and "chapters" in chapters_data:
@@ -100,6 +125,8 @@ def get_album_chapters(album_id):
         chapters_list = []
     chapters = []
     for ch in chapters_list:
+        if isinstance(ch, int):
+            ch = resolved[ch] if ch < len(resolved) else {}
         chapters.append({
             "id": ch.get("id"),
             "index": ch.get("index", 0),

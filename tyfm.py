@@ -25,15 +25,20 @@ DOWNLOADED_IDS_FILE = "downloaded_ids.json"
 
 def request_get(url, params=None):
     headers = {'User-Agent': USER_AGENT}
-    resp = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
-    resp.raise_for_status()
-    return resp
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=TIMEOUT, allow_redirects=True)
+        resp.raise_for_status()
+        return resp
+    except Exception as e:
+        status = resp.status_code if 'resp' in locals() else 'N/A'
+        raise Exception(f"Request failed: {e}, status: {status}")
 
 def extract_nuxt_json(html):
-    pattern = r'<script\s+id="__NUXT_DATA__"\s+type="application/json"[^>]*>(.*?)</script>'
+    pattern = r'<script[^>]*id="__NUXT_DATA__"[^>]*>(.*?)</script>'
     match = re.search(pattern, html, re.DOTALL)
     if not match:
-        raise Exception("__NUXT_DATA__ not found")
+        preview = html[:500].replace('\n', ' ')
+        raise Exception(f"__NUXT_DATA__ not found. Page preview: {preview}")
     json_str = match.group(1).strip()
     json_str = json_str.replace('&quot;', '"').replace('&#39;', "'").replace('&amp;', '&')
     return json.loads(json_str)

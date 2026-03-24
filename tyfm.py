@@ -1,416 +1,294 @@
-# tyfm.py
 import os
 import json
 import re
-import time
 import threading
-import queue
-from urllib.parse import urljoin
 import requests
 import tkinter as tk
-from tkinter import ttk, scrolledtext, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox
+from tkinter.scrolledtext import ScrolledText
 
-BASE_URL = "https://tingyou.fm"
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-TIMEOUT = 15
-RETRY = 3
-THREADS = 3
-AUDIO_URL_TEMPLATES = [
-    "https://file.tingyou8.vip/audio/{chapter_id}.mp3",
-    "https://file.tingyou8.vip/audio/{chapter_id}.m4a",
-    "https://file.tingyoufm.com/audio/{chapter_id}.mp3",
-    "https://audio.tingyou.fm/{chapter_id}.mp3",
-]
-DOWNLOADED_IDS_FILE = "downloaded_ids.json"
+# 配置
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://tingyou.fm/',
+}
 
-def request_get(url, params=None):
-    headers = {'User-Agent': USER_AGENT}
-    try:
-        resp = requests.get(url, headers=headers, params=params, timeout=TIMEOUT, allow_redirects=True)
-        resp.raise_for_status()
-        return resp
-    except Exception as e:
-        status = resp.status_code if 'resp' in locals() else 'N/A'
-        raise Exception(f"Request failed: {e}, status: {status}")
+# 默认API模板（用户可根据实际情况修改）
+DEFAULT_API_URL = 'https://tingyou.fm/api/audio/{chapter_id}'  # 假设的API，需要实际抓包确认
 
-def extract_nuxt_json(html):
-    pattern = r'<script[^>]*id="__NUXT_DATA__"[^>]*>(.*?)</script>'
-    match = re.search(pattern, html, re.DOTALL)
-    if not match:
-        preview = html[:500].replace('\n', ' ')
-        raise Exception(f"__NUXT_DATA__ not found. Page preview: {preview}")
-    json_str = match.group(1).strip()
-    json_str = json_str.replace('&quot;', '"').replace('&#39;', "'").replace('&amp;', '&')
-    return json.loads(json_str)
+class Downloader:
+    def __init__(self, album_url, save_dir, api_url_template=DEFAULT_API_URL):
+        self.album_url = album_url
+        self.save_dir = save_dir
+        self.api_url_template = api_url_template
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
 
-def resolve_refs(data, root):
-    """递归解析整数引用，将整数索引替换为 root[index]"""
-    if isinstance(data, list):
-        return [resolve_refs(item, root) for item in data]
-    elif isinstance(data, dict):
-        return {k: resolve_refs(v, root) for k, v in data.items()}
-    elif isinstance(data, int) and 0 <= data < len(root):
-        return resolve_refs(root[data], root)
-    else:
-        return data
-
-def find_value_by_key(nuxt_data, target_key):
-    def _search(obj):
-        if isinstance(obj, dict):
-            if target_key in obj:
-                return obj[target_key]
-            for v in obj.values():
-                res = _search(v)
-                if res is not None:
-                    return res
-        elif isinstance(obj, list):
-            for item in obj:
-                res = _search(item)
-                if res is not None:
-                    return res
-        return None
-    return _search(nuxt_data)
-
-def search(keyword):
-    url = urljoin(BASE_URL, "/search/result")
-    params = {"keyword": keyword, "page": 1}
-    html = request_get(url, params).text
-    nuxt_data = extract_nuxt_json(html)
-    # 确保 nuxt_data 是列表，用于解析引用
-    if not isinstance(nuxt_data, list):
-        nuxt_data = [nuxt_data]
-    # 先解析整个数据中的引用
-    resolved = resolve_refs(nuxt_data, nuxt_data)
-    search_res = find_value_by_key(resolved, "searchResults")
-    if not search_res:
-        raise Exception("searchResults not found")
-    if isinstance(search_res, dict):
-        album_list = search_res.get("list", [])
-    else:
-        album_list = search_res if isinstance(search_res, list) else []
-    results = []
-    for item in album_list:
-        # 如果 item 是整数，再次解析
-        if isinstance(item, int):
-            item = resolved[item] if item < len(resolved) else {}
-        results.append({
-            "id": item.get("id"),
-            "title": item.get("title", ""),
-            "author": item.get("author", ""),
-            "teller": item.get("teller", ""),
-            "cover": item.get("cover_url", ""),
-            "count": item.get("count", 0),
-            "status": item.get("status", 0),
-        })
-    return results
-
-def get_album_chapters(album_id):
-    url = urljoin(BASE_URL, f"/albums/{album_id}")
-    html = request_get(url).text
-    nuxt_data = extract_nuxt_json(html)
-    if not isinstance(nuxt_data, list):
-        nuxt_data = [nuxt_data]
-    resolved = resolve_refs(nuxt_data, nuxt_data)
-    chapters_key = f"album-chapters-{album_id}"
-    chapters_data = find_value_by_key(resolved, chapters_key)
-    if not chapters_data:
-        chapters_data = find_value_by_key(resolved, "chapters")
-    if not chapters_data:
-        raise Exception("chapters data not found")
-    if isinstance(chapters_data, dict) and "chapters" in chapters_data:
-        chapters_list = chapters_data["chapters"]
-    elif isinstance(chapters_data, list):
-        chapters_list = chapters_data
-    else:
-        chapters_list = []
-    chapters = []
-    for ch in chapters_list:
-        if isinstance(ch, int):
-            ch = resolved[ch] if ch < len(resolved) else {}
-        chapters.append({
-            "id": ch.get("id"),
-            "index": ch.get("index", 0),
-            "title": ch.get("title", ""),
-            "duration": ch.get("duration", 0),
-        })
-    return chapters
-
-def download_audio(chapter_id, title, save_path):
-    for template in AUDIO_URL_TEMPLATES:
-        url = template.format(chapter_id=chapter_id)
+    def get_album_info(self):
+        """获取专辑信息和章节列表"""
         try:
-            resp = requests.get(url, stream=True, timeout=TIMEOUT, headers={'User-Agent': USER_AGENT})
-            if resp.status_code == 200:
-                with open(save_path, 'wb') as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                return True
-        except:
-            continue
-    return False
+            resp = self.session.get(self.album_url, timeout=10)
+            resp.raise_for_status()
+        except Exception as e:
+            raise Exception(f"获取专辑页面失败: {e}")
 
-class DownloadWorker:
-    def __init__(self, max_threads=THREADS, callback=None):
-        self.queue = queue.Queue()
-        self.max_threads = max_threads
-        self.threads = []
-        self.callback = callback
-        self.running = False
+        html = resp.text
+        # 从HTML中提取 __NUXT_DATA__ 中的 JSON 数据
+        match = re.search(r'<script id="__NUXT_DATA__" type="application/json">(.*?)</script>', html, re.DOTALL)
+        if not match:
+            raise Exception("未找到专辑数据，可能页面结构已变化")
 
-    def start(self):
-        self.running = True
-        for _ in range(self.max_threads):
-            t = threading.Thread(target=self._worker)
-            t.daemon = True
-            t.start()
-            self.threads.append(t)
+        json_str = match.group(1)
+        data = json.loads(json_str)
 
-    def add_task(self, task):
-        self.queue.put(task)
+        # 根据已知数据结构提取专辑信息
+        # 专辑数据在 data[3] 中的 "album-detail-{id}" 下，需要遍历找到
+        album_info = None
+        chapters = None
+        for item in data:
+            if isinstance(item, dict):
+                # 查找包含专辑详情的条目
+                for key, value in item.items():
+                    if key.startswith('album-detail-') and isinstance(value, dict):
+                        album_info = value
+                        break
+                # 查找包含章节列表的条目
+                for key, value in item.items():
+                    if key.startswith('album-chapters-') and isinstance(value, dict):
+                        chapters = value.get('chapters', [])
+                        break
+        if not album_info:
+            # 备用方案：直接搜索可能的结构
+            for item in data:
+                if isinstance(item, dict) and 'title' in item and 'author' in item:
+                    album_info = item
+                    break
+            for item in data:
+                if isinstance(item, dict) and 'chapters' in item:
+                    chapters = item['chapters']
+                    break
+        if not album_info or not chapters:
+            raise Exception("无法解析专辑信息或章节列表")
 
-    def _worker(self):
-        while self.running:
-            try:
-                task = self.queue.get(timeout=1)
-            except queue.Empty:
-                continue
-            chapter_id = task['chapter_id']
-            title = task['title']
-            save_path = task['save_path']
-            success = download_audio(chapter_id, title, save_path)
-            message = "Success" if success else "Failed"
-            if self.callback:
-                self.callback(task, success, message)
-            self.queue.task_done()
+        title = album_info.get('title', '未知专辑')
+        return title, chapters
 
-    def stop(self):
-        self.running = False
-        for t in self.threads:
-            t.join(timeout=1)
+    def get_audio_url(self, chapter_id):
+        """根据章节ID获取音频URL"""
+        url = self.api_url_template.format(chapter_id=chapter_id)
+        try:
+            resp = self.session.get(url, timeout=10)
+            resp.raise_for_status()
+            # 假设API返回JSON，包含 'url' 字段
+            data = resp.json()
+            return data.get('url')
+        except Exception as e:
+            raise Exception(f"获取音频URL失败 (章节ID: {chapter_id}): {e}")
 
-class TingYouApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("TingYou FM Downloader")
-        self.root.geometry("900x700")
-        self.root.minsize(800, 600)
+    def download_audio(self, chapter, progress_callback):
+        """下载单个章节"""
+        chapter_id = chapter['id']
+        chapter_title = chapter['title']
+        # 过滤文件名非法字符
+        safe_title = re.sub(r'[\\/*?:"<>|]', '', chapter_title)
+        filename = f"{chapter['index']:03d} - {safe_title}.mp3"
+        filepath = os.path.join(self.save_dir, filename)
 
-        self.download_dir = os.path.join(os.getcwd(), "downloads")
-        if not os.path.exists(self.download_dir):
-            os.makedirs(self.download_dir)
+        audio_url = self.get_audio_url(chapter_id)
+        if not audio_url:
+            raise Exception(f"未获取到音频URL: {chapter_title}")
 
-        self.downloaded_ids = self.load_downloaded_ids()
-        self.search_results = []
-        self.worker = None
+        # 下载音频
+        resp = self.session.get(audio_url, stream=True, timeout=30)
+        resp.raise_for_status()
+        total_size = int(resp.headers.get('content-length', 0))
+        downloaded = 0
+        with open(filepath, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback:
+                        progress_callback(downloaded, total_size)
+        return filepath
 
-        self.build_ui()
+class GUI:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("听友FM下载器")
+        self.root.geometry("800x600")
+        self.downloader = None
+        self.chapters = []
+        self.selected_indices = []
+        self.save_dir = os.path.expanduser("~/Downloads/听友FM")
+
+        self.create_widgets()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def build_ui(self):
-        top_frame = ttk.Frame(self.root, padding="5")
-        top_frame.pack(fill=tk.X)
+    def create_widgets(self):
+        # 专辑URL输入
+        tk.Label(self.root, text="专辑URL:").grid(row=0, column=0, sticky='w', padx=5, pady=5)
+        self.url_entry = tk.Entry(self.root, width=70)
+        self.url_entry.grid(row=0, column=1, padx=5, pady=5)
+        tk.Button(self.root, text="获取专辑信息", command=self.fetch_album).grid(row=0, column=2, padx=5, pady=5)
 
-        ttk.Label(top_frame, text="Keyword:").pack(side=tk.LEFT, padx=5)
-        self.keyword_var = tk.StringVar()
-        self.entry_keyword = ttk.Entry(top_frame, textvariable=self.keyword_var, width=40)
-        self.entry_keyword.pack(side=tk.LEFT, padx=5)
-        self.btn_search = ttk.Button(top_frame, text="Search", command=self.search)
-        self.btn_search.pack(side=tk.LEFT, padx=5)
+        # API模板输入（可选）
+        tk.Label(self.root, text="音频API模板:").grid(row=1, column=0, sticky='w', padx=5, pady=5)
+        self.api_entry = tk.Entry(self.root, width=70)
+        self.api_entry.insert(0, DEFAULT_API_URL)
+        self.api_entry.grid(row=1, column=1, padx=5, pady=5)
+        tk.Label(self.root, text="使用 {chapter_id} 作为章节ID占位符").grid(row=1, column=2, sticky='w', padx=5, pady=5)
 
-        ttk.Label(top_frame, text="Download Dir:").pack(side=tk.LEFT, padx=5)
-        self.dir_var = tk.StringVar(value=self.download_dir)
-        self.entry_dir = ttk.Entry(top_frame, textvariable=self.dir_var, width=30)
-        self.entry_dir.pack(side=tk.LEFT, padx=5)
-        self.btn_browse = ttk.Button(top_frame, text="Browse", command=self.browse_dir)
-        self.btn_browse.pack(side=tk.LEFT, padx=5)
+        # 保存路径选择
+        tk.Label(self.root, text="保存目录:").grid(row=2, column=0, sticky='w', padx=5, pady=5)
+        self.dir_var = tk.StringVar(value=self.save_dir)
+        tk.Entry(self.root, textvariable=self.dir_var, width=70).grid(row=2, column=1, padx=5, pady=5)
+        tk.Button(self.root, text="选择目录", command=self.choose_dir).grid(row=2, column=2, padx=5, pady=5)
 
-        columns = ("id", "title", "author", "teller", "count", "status")
-        self.tree = ttk.Treeview(self.root, columns=columns, show="headings", height=12)
-        self.tree.heading("id", text="ID")
-        self.tree.heading("title", text="Title")
-        self.tree.heading("author", text="Author")
-        self.tree.heading("teller", text="Teller")
-        self.tree.heading("count", text="Chapters")
-        self.tree.heading("status", text="Status")
-        self.tree.column("id", width=80)
-        self.tree.column("title", width=300)
-        self.tree.column("author", width=120)
-        self.tree.column("teller", width=120)
-        self.tree.column("count", width=60)
-        self.tree.column("status", width=80)
-        self.tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.tree.bind("<<TreeviewSelect>>", self.on_album_select)
+        # 专辑信息显示
+        tk.Label(self.root, text="专辑信息:").grid(row=3, column=0, sticky='w', padx=5, pady=5)
+        self.album_info_label = tk.Label(self.root, text="未获取", anchor='w', justify='left')
+        self.album_info_label.grid(row=3, column=1, columnspan=2, sticky='w', padx=5, pady=5)
 
-        btn_frame = ttk.Frame(self.root, padding="5")
-        btn_frame.pack(fill=tk.X)
-        self.btn_download = ttk.Button(btn_frame, text="Download Selected", command=self.download_album, state=tk.DISABLED)
-        self.btn_download.pack(side=tk.LEFT, padx=5)
-        self.btn_download_all = ttk.Button(btn_frame, text="Download All", command=self.download_all)
-        self.btn_download_all.pack(side=tk.LEFT, padx=5)
-        self.progress = ttk.Progressbar(btn_frame, mode='indeterminate')
-        self.progress.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
+        # 章节列表
+        tk.Label(self.root, text="章节列表:").grid(row=4, column=0, sticky='nw', padx=5, pady=5)
+        frame = tk.Frame(self.root)
+        frame.grid(row=4, column=1, columnspan=2, sticky='nsew', padx=5, pady=5)
+        self.root.grid_rowconfigure(4, weight=1)
+        self.root.grid_columnconfigure(1, weight=1)
 
-        log_frame = ttk.LabelFrame(self.root, text="Log", padding="5")
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, state=tk.NORMAL)
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-        self.log_text.config(state=tk.DISABLED)
+        self.listbox = tk.Listbox(frame, selectmode='extended', height=15)
+        scrollbar = tk.Scrollbar(frame, orient='vertical', command=self.listbox.yview)
+        self.listbox.config(yscrollcommand=scrollbar.set)
+        self.listbox.pack(side='left', fill='both', expand=True)
+        scrollbar.pack(side='right', fill='y')
+
+        # 按钮区
+        btn_frame = tk.Frame(self.root)
+        btn_frame.grid(row=5, column=0, columnspan=3, pady=10)
+        tk.Button(btn_frame, text="全选", command=self.select_all).pack(side='left', padx=5)
+        tk.Button(btn_frame, text="全不选", command=self.select_none).pack(side='left', padx=5)
+        tk.Button(btn_frame, text="下载选中", command=self.download_selected).pack(side='left', padx=5)
+
+        # 进度条
+        self.progress = ttk.Progressbar(self.root, orient='horizontal', length=400, mode='determinate')
+        self.progress.grid(row=6, column=0, columnspan=3, pady=10, padx=10, sticky='ew')
+        self.progress_label = tk.Label(self.root, text="")
+        self.progress_label.grid(row=7, column=0, columnspan=3)
+
+        # 日志区域
+        tk.Label(self.root, text="日志:").grid(row=8, column=0, sticky='nw', padx=5, pady=5)
+        self.log_text = ScrolledText(self.root, height=10, state='normal')
+        self.log_text.grid(row=8, column=1, columnspan=2, sticky='nsew', padx=5, pady=5)
+        self.root.grid_rowconfigure(8, weight=1)
 
     def log(self, msg):
-        self.log_text.config(state=tk.NORMAL)
-        self.log_text.insert(tk.END, f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+        self.log_text.insert(tk.END, msg + "\n")
         self.log_text.see(tk.END)
-        self.log_text.config(state=tk.DISABLED)
         self.root.update_idletasks()
 
-    def browse_dir(self):
-        dir_path = filedialog.askdirectory(initialdir=self.download_dir)
-        if dir_path:
-            self.download_dir = dir_path
-            self.dir_var.set(dir_path)
-            self.log(f"Download directory set to: {dir_path}")
+    def choose_dir(self):
+        directory = filedialog.askdirectory(initialdir=self.save_dir)
+        if directory:
+            self.save_dir = directory
+            self.dir_var.set(directory)
 
-    def search(self):
-        keyword = self.keyword_var.get().strip()
-        if not keyword:
-            messagebox.showwarning("Warning", "Please enter a keyword")
+    def fetch_album(self):
+        url = self.url_entry.get().strip()
+        if not url:
+            messagebox.showerror("错误", "请输入专辑URL")
             return
-        self.log(f"Searching: {keyword}")
-        self.btn_search.config(state=tk.DISABLED)
-        try:
-            results = search(keyword)
-            self.search_results = results
-            for item in self.tree.get_children():
-                self.tree.delete(item)
-            for r in results:
-                status_text = "Ongoing" if r['status'] == 1 else "Completed"
-                self.tree.insert("", tk.END, values=(
-                    r['id'], r['title'], r['author'], r['teller'], r['count'], status_text
-                ))
-            self.log(f"Search completed, found {len(results)} albums")
-        except Exception as e:
-            self.log(f"Search failed: {e}")
-            messagebox.showerror("Error", f"Search failed: {e}")
-        finally:
-            self.btn_search.config(state=tk.NORMAL)
-
-    def on_album_select(self, event):
-        selected = self.tree.selection()
-        self.btn_download.config(state=tk.NORMAL if selected else tk.DISABLED)
-
-    def get_selected_album(self):
-        selected = self.tree.selection()
-        if not selected:
-            return None
-        item = self.tree.item(selected[0])
-        values = item['values']
-        for album in self.search_results:
-            if album['id'] == values[0]:
-                return album
-        return None
-
-    def download_album(self):
-        album = self.get_selected_album()
-        if not album:
-            return
-        self.log(f"Preparing to download album: {album['title']} (ID: {album['id']})")
-        self.download_album_by_id(album)
-
-    def download_all(self):
-        if not self.search_results:
-            messagebox.showinfo("Info", "No search results. Please search first.")
-            return
-        self.log("Starting download of all albums in search results...")
-        for album in self.search_results:
-            self.download_album_by_id(album)
-
-    def download_album_by_id(self, album):
-        album_dir = os.path.join(self.download_dir, f"{album['id']}_{self.safe_filename(album['title'])}")
-        os.makedirs(album_dir, exist_ok=True)
-        try:
-            chapters = get_album_chapters(album['id'])
-            self.log(f"Album {album['title']}: fetched {len(chapters)} chapters")
-        except Exception as e:
-            self.log(f"Album {album['title']} failed to fetch chapters: {e}")
-            return
-        tasks = []
-        for ch in chapters:
-            ch_id = ch['id']
-            if ch_id in self.downloaded_ids:
-                self.log(f"Chapter {ch['index']} already downloaded, skipping")
-                continue
-            safe_title = self.safe_filename(ch['title'])
-            filename = f"{ch['index']:03d}_{safe_title}.mp3"
-            save_path = os.path.join(album_dir, filename)
-            if os.path.exists(save_path):
-                self.log(f"File exists: {filename}, skipping")
-                self.downloaded_ids.add(ch_id)
-                continue
-            tasks.append({
-                "chapter_id": ch_id,
-                "title": ch['title'],
-                "save_path": save_path,
-                "album_title": album['title']
-            })
-        if not tasks:
-            self.log(f"Album {album['title']}: no new chapters to download")
-            return
-        self.log(f"Album {album['title']}: added {len(tasks)} download tasks")
-        self.start_download(tasks)
-
-    def start_download(self, tasks):
-        if self.worker and self.worker.running:
-            for task in tasks:
-                self.worker.add_task(task)
-        else:
-            self.worker = DownloadWorker(callback=self.on_download_complete)
-            self.worker.start()
-            for task in tasks:
-                self.worker.add_task(task)
-
-    def on_download_complete(self, task, success, message):
-        ch_id = task['chapter_id']
-        if success:
-            self.log(f"✓ {task['album_title']} - {task['title']}: {message}")
-            self.downloaded_ids.add(ch_id)
-            self.save_downloaded_ids()
-        else:
-            self.log(f"✗ {task['album_title']} - {task['title']}: {message}")
-
-    def safe_filename(self, text):
-        invalid = '<>:"/\\|?*'
-        for ch in invalid:
-            text = text.replace(ch, '_')
-        text = text.strip().replace(' ', '_')
-        if len(text) > 100:
-            text = text[:100]
-        return text
-
-    def load_downloaded_ids(self):
-        record_file = os.path.join(self.download_dir, DOWNLOADED_IDS_FILE)
-        if os.path.exists(record_file):
+        api_template = self.api_entry.get().strip()
+        if not api_template:
+            api_template = DEFAULT_API_URL
+        self.save_dir = self.dir_var.get()
+        if not os.path.exists(self.save_dir):
             try:
-                with open(record_file, 'r', encoding='utf-8') as f:
-                    return set(json.load(f))
+                os.makedirs(self.save_dir)
             except:
-                pass
-        return set()
+                messagebox.showerror("错误", "无法创建保存目录")
+                return
 
-    def save_downloaded_ids(self):
-        record_file = os.path.join(self.download_dir, DOWNLOADED_IDS_FILE)
-        with open(record_file, 'w', encoding='utf-8') as f:
-            json.dump(list(self.downloaded_ids), f, ensure_ascii=False)
+        self.log("正在获取专辑信息...")
+        self.listbox.delete(0, tk.END)
+        self.chapters = []
+        self.selected_indices = []
+
+        def task():
+            try:
+                downloader = Downloader(url, self.save_dir, api_template)
+                title, chapters = downloader.get_album_info()
+                self.chapters = chapters
+                self.root.after(0, self._update_listbox, title, chapters)
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("错误", str(e)))
+                self.root.after(0, lambda: self.log(f"错误: {e}"))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _update_listbox(self, title, chapters):
+        self.album_info_label.config(text=f"{title} (共{len(chapters)}集)")
+        for ch in chapters:
+            idx = ch['index']
+            name = ch['title']
+            self.listbox.insert(tk.END, f"{idx:03d} - {name}")
+        self.log(f"获取成功，共{len(chapters)}集")
+
+    def select_all(self):
+        self.listbox.selection_set(0, tk.END)
+        self.selected_indices = list(range(len(self.chapters)))
+
+    def select_none(self):
+        self.listbox.selection_clear(0, tk.END)
+        self.selected_indices = []
+
+    def download_selected(self):
+        indices = list(self.listbox.curselection())
+        if not indices:
+            messagebox.showwarning("警告", "未选中任何章节")
+            return
+        self.selected_indices = indices
+        self.log(f"开始下载，共选中{len(indices)}集")
+        # 禁用按钮，避免重复点击
+        for child in self.root.winfo_children():
+            if isinstance(child, tk.Button) and child['text'] in ['下载选中', '获取专辑信息']:
+                child.config(state='disabled')
+        threading.Thread(target=self._download_worker, daemon=True).start()
+
+    def _download_worker(self):
+        total = len(self.selected_indices)
+        completed = 0
+        for pos, idx in enumerate(self.selected_indices):
+            chapter = self.chapters[idx]
+            title = f"{chapter['index']:03d} - {chapter['title']}"
+            self.root.after(0, lambda t=title: self.log(f"正在下载: {t}"))
+            # 进度回调
+            def progress_callback(downloaded, total_size, chapter_title=title):
+                percent = (downloaded / total_size * 100) if total_size > 0 else 0
+                self.root.after(0, lambda: self.progress.config(value=percent))
+                self.root.after(0, lambda: self.progress_label.config(text=f"{chapter_title}: {percent:.1f}%"))
+            try:
+                downloader = Downloader(self.url_entry.get().strip(), self.save_dir, self.api_entry.get().strip())
+                filepath = downloader.download_audio(chapter, progress_callback)
+                self.root.after(0, lambda p=filepath: self.log(f"下载完成: {p}"))
+                completed += 1
+                self.root.after(0, lambda: self.progress_label.config(text=f"总体进度: {completed}/{total}"))
+            except Exception as e:
+                self.root.after(0, lambda err=str(e): self.log(f"下载失败: {err}"))
+        self.root.after(0, lambda: self.log("所有下载任务完成"))
+        self.root.after(0, lambda: self.progress.config(value=0))
+        self.root.after(0, lambda: self.progress_label.config(text=""))
+        # 恢复按钮
+        for child in self.root.winfo_children():
+            if isinstance(child, tk.Button) and child['text'] in ['下载选中', '获取专辑信息']:
+                child.config(state='normal')
 
     def on_close(self):
-        if self.worker:
-            self.worker.stop()
         self.root.destroy()
 
-def main():
-    root = tk.Tk()
-    app = TingYouApp(root)
-    root.mainloop()
+    def run(self):
+        self.root.mainloop()
 
 if __name__ == "__main__":
-    main()
+    gui = GUI()
+    gui.run()

@@ -7,6 +7,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # 消除 Node.js 版本警告（可选）
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -25,9 +28,23 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: 调试：检查 curl_cffi 位置
+        run: |
+          python -c "import curl_cffi; print(curl_cffi.__file__)"
+
       - name: 使用 PyInstaller 打包
         run: |
-          pyinstaller --onefile --windowed --name "i275" --add-data "curl_cffi;curl_cffi" i275.py
+          pyinstaller `
+            --onefile `
+            --windowed `
+            --name "i275" `
+            --hidden-import tkinter `
+            --hidden-import curl_cffi `
+            --collect-all curl_cffi `
+            i275.py
+
+      - name: 列出 dist 目录内容（调试用）
+        run: dir dist
 
       - name: 上传构建产物 (exe)
         uses: actions/upload-artifact@v4

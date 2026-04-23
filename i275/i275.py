@@ -22,7 +22,7 @@ class AudioDownloader:
     def __init__(self, log_callback=None, stats_callback=None):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0',
             'Referer': 'https://m.i275.com/'
         })
         self.log_callback = log_callback
@@ -174,7 +174,7 @@ class AudioDownloader:
 class DownloaderApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("275听书网批量下载工具")
+        self.root.title("i275听书网下载工具")
         self.root.geometry("1000x700")
         self.root.minsize(900, 600)
         self.root.configure(bg='#f5f5f5')

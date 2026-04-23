@@ -1,4 +1,4 @@
-name: Build i275.exe
+name: Build i275 EXE
 
 on:
   push:
@@ -21,15 +21,16 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r i275/requirements.txt
           pip install pyinstaller
 
       - name: Build executable
         run: |
+          cd i275
           pyinstaller --onefile --windowed --name i275 i275.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: i275-exe
-          path: dist/i275.exe
+          path: i275/dist/i275.exe

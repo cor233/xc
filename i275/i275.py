@@ -21,7 +21,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 ]
-IMPERSONATES = ["chrome120", "chrome119", "firefox121", "safari17_0"]
+IMPERSONATES = ["chrome120", "chrome119", "safari17_0"]
 MAX_FILENAME_LEN = 200
 COMPLETED_FILE = ".completed.json"
 FAILED_FILE = ".failed.json"
@@ -182,7 +182,7 @@ class DownloadWorker:
                 if resp.status_code == 200:
                     if any(kw in resp.text for kw in ["您的操作太快了", "稍后再试", "访问频繁"]) or resp.status_code == 429:
                         with self.cool_down_lock:
-                            cool_seconds = random.randint(600, 1200)  # 10~20分钟
+                            cool_seconds = random.randint(600, 1200)
                             self.cool_down_until = time.time() + cool_seconds
                         self.log(f"触发频率限制，进入全局冷却 {cool_seconds} 秒，请勿关闭程序...")
                         time.sleep(10)
@@ -248,13 +248,11 @@ class DownloadWorker:
         if not resp:
             return None
         text = resp.text
-
         pattern_ap = r"url:\s*['\"](http[^'\"]+)['\"]"
         match = re.search(pattern_ap, text)
         if match:
             url = match.group(1).replace('\\/', '/')
             return url
-            
         patterns = [
             r"url:\s*'([^']+)'",
             r'"url"\s*:\s*"([^"]+)"',
@@ -269,7 +267,6 @@ class DownloadWorker:
                 url = match.group(1).replace('\\/', '/')
                 if url.startswith('http'):
                     return url
-
         self.log(f"无法提取音频URL，响应片段：{text[:300]}")
         return None
 

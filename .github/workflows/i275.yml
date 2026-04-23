@@ -1,36 +1,39 @@
 name: Build i275 EXE
-
 on:
   push:
-    branches: [ main, master ]
-  workflow_dispatch:
+    branches: [ main ]
+    paths:
+      - 'i275/i275.py'
+      - 'i275/requirements.txt'
+      - '.github/workflows/build-exe.yml'
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    - name: 检出代码
+      uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+    - name: 设置 Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r i275/requirements.txt
-          pip install pyinstaller
+    - name: 安装依赖
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r i275/requirements.txt
+        pip install pyinstaller
 
-      - name: Build executable
-        run: |
-          cd i275
-          pyinstaller --onefile --windowed --name i275 i275.py
+    - name: 使用 PyInstaller 打包
+      run: |
+        cd i275
+        pyinstaller --onefile --windowed --name "275AudioDownloader" i275.py
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: i275-exe
-          path: i275/dist/i275.exe
+    - name: 上传 EXE 文件
+      uses: actions/upload-artifact@v4
+      with:
+        name: 275AudioDownloader
+        path: i275/dist/275AudioDownloader.exe

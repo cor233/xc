@@ -1,11 +1,8 @@
 name: Build tyfm EXE
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: windows-latest
@@ -17,7 +14,7 @@ jobs:
       - name: 设置 Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: 安装依赖
         run: |
@@ -27,7 +24,6 @@ jobs:
       - name: 打包成 EXE
         run: |
           pyinstaller --onefile --name tyfm --windowed tyfm.py
-          # 如果不需要控制台窗口，去掉 --windowed 即可显示命令行窗口
 
       - name: 上传 Artifact
         uses: actions/upload-artifact@v4

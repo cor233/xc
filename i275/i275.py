@@ -4,7 +4,7 @@ import time
 import threading
 import requests
 from urllib.parse import urljoin
-from tkinter import Tk, ttk, messagebox, filedialog, StringVar, IntVar
+from tkinter import Tk, ttk, messagebox, filedialog, StringVar, IntVar, BooleanVar
 from tkinter.scrolledtext import ScrolledText
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
@@ -108,7 +108,7 @@ class DownloadManager:
     def __init__(self, gui):
         self.gui = gui
         self.session = requests.Session()
-        self.session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+        self.session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0'})
         self.cancelled = False
         self.executor = None
 
@@ -161,6 +161,7 @@ class DownloadManager:
             self.gui.log("失败章节：")
             for ch in failed_list:
                 self.gui.log(f"  {ch['index']}. {ch['title']}")
+        self.gui.on_download_finished()
 
     def download_one(self, chapter, output_dir):
         filename = sanitize_filename(chapter['title']) + '.' + get_extension(chapter['url'])
@@ -202,10 +203,26 @@ class DownloadManager:
 class Application:
     def __init__(self):
         self.root = Tk()
-        self.root.title("275听书网下载器 v2.0")
-        self.root.geometry("700x600")
+        self.root.title("i275听书网下载工具")
+        self.root.geometry("800x650")
         self.root.resizable(True, True)
+
+        self.style = ttk.Style()
+        self.style.theme_use('clam')
+        self.style.configure('TButton', padding=6, relief='flat', background='#7c3aed', foreground='white')
+        self.style.map('TButton', background=[('active', '#6d28d9'), ('disabled', '#d1d5db')])
+        self.style.configure('TLabel', background='#f3f4f6')
+        self.style.configure('TFrame', background='#f3f4f6')
+        self.style.configure('TLabelframe', background='#f3f4f6')
+        self.style.configure('TLabelframe.Label', background='#f3f4f6', foreground='#4b5563')
+        self.style.configure('TEntry', fieldbackground='white')
+        self.style.configure('Treeview', rowheight=25)
+        self.style.map('Treeview', background=[('selected', '#7c3aed')])
+
+        self.root.configure(bg='#f3f4f6')
+
         self.threads = IntVar(value=3)
+        self.auto_download = BooleanVar(value=True)
         self.manager = None
         self.download_thread = None
         self.session = requests.Session()
@@ -213,6 +230,7 @@ class Application:
         self.all_chapters = []
         self.current_book_title = ""
         self.current_book_narrator = ""
+
         self.create_widgets()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -224,31 +242,45 @@ class Application:
         search_frame.pack(fill='x', pady=(0, 5))
         ttk.Label(search_frame, text="搜索书名：").pack(side='left')
         self.search_var = StringVar()
-        ttk.Entry(search_frame, textvariable=self.search_var, width=35).pack(side='left', padx=5)
+        ttk.Entry(search_frame, textvariable=self.search_var, width=40, font=('', 10)).pack(side='left', padx=5)
         ttk.Button(search_frame, text="搜索", command=self.do_search).pack(side='left')
+        ttk.Checkbutton(search_frame, text="解析后自动下载", variable=self.auto_download).pack(side='left', padx=15)
 
-        tree_frame = ttk.Frame(mainframe)
-        tree_frame.pack(fill='both', expand=True, pady=5)
-        self.result_tree = ttk.Treeview(tree_frame, columns=('title', 'narrator'), show='headings')
+        paned = ttk.PanedWindow(mainframe, orient='vertical')
+        paned.pack(fill='both', expand=True, pady=5)
+
+        tree_frame = ttk.Frame(paned)
+        self.result_tree = ttk.Treeview(tree_frame, columns=('title', 'narrator'), show='headings', height=8)
         self.result_tree.heading('title', text='书名')
         self.result_tree.heading('narrator', text='演播')
         self.result_tree.column('title', width=350)
         self.result_tree.column('narrator', width=200)
-        self.result_tree.pack(side='left', fill='both', expand=True)
         tree_scroll = ttk.Scrollbar(tree_frame, orient='vertical', command=self.result_tree.yview)
         self.result_tree.configure(yscrollcommand=tree_scroll.set)
+        self.result_tree.pack(side='left', fill='both', expand=True)
         tree_scroll.pack(side='right', fill='y')
         self.result_tree.bind('<Double-1>', self.on_book_select)
+        paned.add(tree_frame, weight=1)
+
+        log_frame = ttk.Frame(paned)
+        self.log_area = ScrolledText(log_frame, state='normal', wrap='word', font=('Consolas', 9), bg='white')
+        log_scroll = ttk.Scrollbar(log_frame, orient='vertical', command=self.log_area.yview)
+        self.log_area.configure(yscrollcommand=log_scroll.set)
+        self.log_area.pack(side='left', fill='both', expand=True)
+        log_scroll.pack(side='right', fill='y')
+        paned.add(log_frame, weight=1)
 
         self.chapter_label = ttk.Label(mainframe, text="章节数：尚未解析")
         self.chapter_label.pack(anchor='w', pady=(5, 0))
 
         settings_frame = ttk.LabelFrame(mainframe, text="下载设置", padding="5")
         settings_frame.pack(fill='x', pady=5)
+
         ttk.Label(settings_frame, text="保存目录：").grid(row=0, column=0, sticky='w')
         self.dir_var = StringVar(value=os.getcwd())
-        ttk.Entry(settings_frame, textvariable=self.dir_var, width=40).grid(row=0, column=1, sticky='we', padx=5)
+        ttk.Entry(settings_frame, textvariable=self.dir_var, width=50).grid(row=0, column=1, sticky='we', padx=5)
         ttk.Button(settings_frame, text="浏览", command=self.browse_dir).grid(row=0, column=2, padx=5)
+
         ttk.Label(settings_frame, text="并发数：").grid(row=1, column=0, sticky='w', pady=5)
         ttk.Spinbox(settings_frame, from_=1, to=10, textvariable=self.threads, width=5).grid(row=1, column=1, sticky='w', pady=5)
 
@@ -272,13 +304,7 @@ class Application:
         self.stop_btn = ttk.Button(btn_frame, text="终止", command=self.stop_download, state='disabled')
         self.stop_btn.pack(side='left', padx=5)
 
-        log_frame = ttk.Frame(mainframe)
-        log_frame.pack(fill='both', expand=True, pady=5)
-        self.log_area = ScrolledText(log_frame, state='normal', wrap='word')
-        self.log_area.pack(side='left', fill='both', expand=True)
-        log_scroll = ttk.Scrollbar(log_frame, orient='vertical', command=self.log_area.yview)
-        self.log_area.configure(yscrollcommand=log_scroll.set)
-        log_scroll.pack(side='right', fill='y')
+        settings_frame.columnconfigure(1, weight=1)
 
     def log(self, msg):
         self.log_area.insert('end', msg + '\n')
@@ -331,6 +357,9 @@ class Application:
             self.end_var.set(len(chapters))
             self.chapter_label.config(text=f"章节数：{len(chapters)}")
             self.log(f"解析完成，共 {len(chapters)} 章")
+            if self.auto_download.get():
+                self.log("自动下载已启用，立即开始下载")
+                self.start_download()
         except Exception as e:
             self.log(f"章节解析失败：{str(e)}")
 
@@ -376,6 +405,10 @@ class Application:
             if self.manager and self.manager.cancelled:
                 self.status_var.set("已终止")
             self.manager = None
+
+    def on_download_finished(self):
+        self.download_btn['state'] = 'normal'
+        self.stop_btn['state'] = 'disabled'
 
     def stop_download(self):
         if self.manager:

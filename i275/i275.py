@@ -2,113 +2,82 @@ import os
 import re
 import time
 import threading
-import json
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
-# -------------------- 非法字符处理 --------------------
-def safe_filename(s: str, replace_char: str = '_') -> str:
-    illegal_chars = r'[\\/:*?"<>|]'
-    return re.sub(illegal_chars, replace_char, s)
+# -------------------- 非法字符映射为相似合法字符 --------------------
+ILLEGAL_CHAR_MAP = {
+    '\\': '＼',   # 全角反斜线
+    '/':  '／',   # 全角斜线
+    ':':  '：',   # 全角冒号
+    '*':  '＊',   # 全角星号
+    '?':  '？',   # 全角问号
+    '"':  '＂',   # 全角双引号
+    '<':  '＜',   # 全角小于
+    '>':  '＞',   # 全角大于
+    '|':  '｜',   # 全角竖线
+}
 
-# -------------------- 本地下载记录数据库 --------------------
-class DownloadDB:
-    def __init__(self, db_file='download_records.json'):
-        self.db_file = db_file
-        self.data = self.load()
+def safe_filename(s: str) -> str:
+    """将文件名中的非法字符替换为全角相似字符"""
+    for illegal, safe in ILLEGAL_CHAR_MAP.items():
+        s = s.replace(illegal, safe)
+    # 去除首尾空格和点号
+    s = s.strip().rstrip('.')
+    return s
 
-    def load(self):
-        if os.path.exists(self.db_file):
-            with open(self.db_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {}
-
-    def save(self):
-        with open(self.db_file, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=2)
-
-    def get_book_record(self, book_id):
-        return self.data.get(str(book_id), {})
-
-    def update_chapter_status(self, book_id, chapter_index, status, filename=''):
-        book_id = str(book_id)
-        if book_id not in self.data:
-            self.data[book_id] = {'chapters': {}}
-        self.data[book_id]['chapters'][str(chapter_index)] = {
-            'status': status,
-            'filename': filename,
-            'time': time.time()
-        }
-        self.save()
-
-    def get_book_stats(self, book_id):
-        rec = self.get_book_record(book_id)
-        chapters = rec.get('chapters', {})
-        total = len(chapters)
-        success = sum(1 for c in chapters.values() if c['status'] == 'success')
-        failed = sum(1 for c in chapters.values() if c['status'] == 'failed')
-        return {'total': total, 'success': success, 'failed': failed, 'chapters': chapters}
-
-# -------------------- 核心下载逻辑 --------------------
+# -------------------- 下载核心类 --------------------
 class AudioDownloader:
-    def __init__(self, db, progress_callback=None, log_callback=None):
+    def __init__(self, progress_callback=None, log_callback=None, file_progress_callback=None):
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Referer': 'https://m.i275.com/',
         })
-        self.db = db
         self.progress_callback = progress_callback
         self.log_callback = log_callback
-        self.is_running = False
+        self.file_progress_callback = file_progress_callback
         self.cancel_flag = False
 
     def log(self, msg):
         if self.log_callback:
             self.log_callback(msg)
-        else:
-            print(msg)
 
     def update_progress(self, current, total):
         if self.progress_callback:
             self.progress_callback(current, total)
 
-    def search(self, keyword):
-        """搜索返回书籍列表"""
-        url = f"https://m.i275.com/search.php?q={keyword}"
+    def update_file_progress(self, current, total):
+        if self.file_progress_callback:
+            self.file_progress_callback(current, total)
+
+    def search_books(self, keyword: str):
+        """搜索书籍，返回列表 [(书名, 演播, 封面url, 详情页url), ...]"""
+        url = f"https://m.i275.com/search.php?q={requests.utils.quote(keyword)}"
         resp = self.session.get(url, timeout=15)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
         results = []
-        for item in soup.select('a[href*="/book/"]'):
-            if not item.select_one('img'):
+        for a in soup.select('a[href*="/book/"]'):
+            href = a.get('href')
+            if not href or '/book/' not in href:
                 continue
-            href = item.get('href')
-            match = re.search(r'/book/(\d+)\.html', href)
-            if not match:
-                continue
-            book_id = match.group(1)
-            img = item.select_one('img')
+            detail_url = urljoin(url, href)
+            img = a.select_one('img')
             cover = img.get('src') if img else ''
-            title_elem = item.select_one('h3') or item.select_one('.font-medium')
-            title = title_elem.text.strip() if title_elem else '未知'
-            author_elem = item.select_one('.text-xs')
-            author = author_elem.text.strip() if author_elem else ''
-            results.append({
-                'id': book_id,
-                'title': title,
-                'author': author,
-                'cover': cover,
-                'url': urljoin(url, href)
-            })
+            title_tag = a.select_one('h3') or a.select_one('.font-medium')
+            title = title_tag.text.strip() if title_tag else '未知书名'
+            narrator_tag = a.select_one('.text-xs.text-gray-500')
+            narrator = narrator_tag.text.strip() if narrator_tag else ''
+            results.append((title, narrator, cover, detail_url))
         return results
 
-    def fetch_book_details(self, book_url):
-        """获取书籍详情和章节列表"""
-        resp = self.session.get(book_url, timeout=15)
+    def fetch_chapters(self, detail_url: str):
+        """从书籍详情页提取所有章节 (标题, 播放页url)"""
+        resp = self.session.get(detail_url, timeout=15)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
         book_title = safe_filename(soup.select_one('h1').text.strip() if soup.select_one('h1') else '未知书名')
@@ -117,29 +86,27 @@ class AudioDownloader:
             href = a.get('href')
             if not href:
                 continue
-            full_url = urljoin(book_url, href)
+            play_url = urljoin(detail_url, href)
             title_span = a.select_one('span.text-sm')
-            chapter_title = title_span.text.strip() if title_span else f"章节{len(chapters)+1}"
-            chapters.append({
-                'url': full_url,
-                'title': safe_filename(chapter_title)
-            })
+            chap_title = title_span.text.strip() if title_span else f"章节{len(chapters)+1}"
+            chapters.append((safe_filename(chap_title), play_url))
         return book_title, chapters
 
-    def extract_audio_url(self, play_url):
+    def extract_audio_url(self, play_url: str):
+        """从播放页提取音频直链"""
         resp = self.session.get(play_url, timeout=15)
         resp.encoding = 'utf-8'
         html = resp.text
         match = re.search(r"url:\s*['\"]([^'\"]+\.m4a[^'\"]*)['\"]", html)
         if match:
-            audio_url = match.group(1).replace('\\', '')
-            return audio_url
+            return match.group(1).replace('\\', '')
         match = re.search(r"url:\s*['\"]([^'\"]+)['\"]", html)
         if match:
             return match.group(1).replace('\\', '')
         raise Exception("未找到音频链接")
 
-    def download_audio(self, audio_url, save_path):
+    def download_audio(self, audio_url: str, save_path: str):
+        """下载单个音频文件，带进度回调"""
         resp = self.session.get(audio_url, stream=True, timeout=30)
         total_size = int(resp.headers.get('content-length', 0))
         downloaded = 0
@@ -151,142 +118,123 @@ class AudioDownloader:
                     f.write(chunk)
                     downloaded += len(chunk)
                     if total_size:
-                        self.update_progress(downloaded, total_size)
+                        self.update_file_progress(downloaded, total_size)
         return True
 
-    def download_chapters(self, book_id, book_title, chapters, output_dir, selected_indices=None):
-        self.is_running = True
-        self.cancel_flag = False
+    def download_selected(self, book_title: str, selected_chapters: list, output_dir: str):
+        """下载选中的章节列表 [(chap_title, play_url), ...]"""
         book_dir = os.path.join(output_dir, book_title)
         os.makedirs(book_dir, exist_ok=True)
-
-        if selected_indices is None:
-            selected_indices = list(range(len(chapters)))
-
-        total = len(selected_indices)
-        for seq, idx in enumerate(selected_indices, 1):
+        total = len(selected_chapters)
+        for idx, (chap_title, play_url) in enumerate(selected_chapters, 1):
             if self.cancel_flag:
                 self.log("任务已取消")
                 break
-            chap = chapters[idx]
-            chap_title = chap['title']
-            self.log(f"[{seq}/{total}] 正在处理: {chap_title}")
+            self.log(f"[{idx}/{total}] {chap_title}")
             try:
-                audio_url = self.extract_audio_url(chap['url'])
+                audio_url = self.extract_audio_url(play_url)
                 ext = os.path.splitext(urlparse(audio_url).path)[1] or '.m4a'
-                filename = f"{idx+1:03d}_{chap_title}{ext}"
+                filename = f"{idx:03d}_{chap_title}{ext}"
                 save_path = os.path.join(book_dir, filename)
                 self.download_audio(audio_url, save_path)
-                self.db.update_chapter_status(book_id, idx, 'success', filename)
-                self.log(f"    ✓ 已保存: {filename}")
+                self.log(f"  ✓ 已保存: {filename}")
+                self.update_progress(idx, total)
             except Exception as e:
-                self.db.update_chapter_status(book_id, idx, 'failed')
-                self.log(f"    ✗ 失败: {str(e)}")
-            time.sleep(1)
-        self.log("下载任务结束")
-        self.is_running = False
-        self.update_progress(0, 0)
+                self.log(f"  ✗ 失败: {str(e)}")
+            time.sleep(1)  # 礼貌间隔
 
     def stop(self):
         self.cancel_flag = True
-        self.is_running = False
 
 # -------------------- GUI 界面 --------------------
-class DownloaderGUI:
+class DownloaderApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("275听书网批量下载工具 - 带搜索")
-        self.root.geometry("950x700")
-        self.db = DownloadDB()
+        self.root.title("275听书网批量下载工具 v2.0")
+        self.root.geometry("900x700")
+        self.root.resizable(True, True)
+
         self.downloader = None
         self.thread = None
         self.output_dir = tk.StringVar(value=os.getcwd())
         self.search_keyword = tk.StringVar()
-        self.current_book = None
-        self.current_chapters = []
+        self.current_book_title = ""
+        self.chapters = []          # [(title, url), ...]
+        self.check_vars = []        # 每章的 tk.BooleanVar
+
         self.setup_ui()
 
     def setup_ui(self):
-        main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        main_paned.pack(fill=tk.BOTH, expand=True)
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 左侧搜索区
-        left_frame = ttk.Frame(main_paned, width=350)
-        main_paned.add(left_frame, weight=1)
+        # ---------- 搜索区域 ----------
+        search_frame = ttk.LabelFrame(main_frame, text="搜索书籍", padding="10")
+        search_frame.pack(fill=tk.X, pady=5)
 
-        search_frame = ttk.LabelFrame(left_frame, text="搜索有声小说", padding="5")
-        search_frame.pack(fill=tk.X, padx=5, pady=5)
-        ttk.Entry(search_frame, textvariable=self.search_keyword).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        ttk.Button(search_frame, text="搜索", command=self.do_search).pack(side=tk.LEFT, padx=5)
+        ttk.Label(search_frame, text="关键词:").grid(row=0, column=0, padx=5)
+        ttk.Entry(search_frame, textvariable=self.search_keyword, width=40).grid(row=0, column=1, padx=5)
+        ttk.Button(search_frame, text="搜索", command=self.start_search).grid(row=0, column=2, padx=5)
+        ttk.Button(search_frame, text="停止", command=self.stop_download, state=tk.DISABLED).grid(row=0, column=3, padx=5)
 
-        result_frame = ttk.LabelFrame(left_frame, text="搜索结果", padding="5")
-        result_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # 搜索结果列表（Treeview）
+        list_frame = ttk.LabelFrame(main_frame, text="搜索结果（双击选择）", padding="5")
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
-        columns = ('title', 'author', 'stats')
-        self.result_tree = ttk.Treeview(result_frame, columns=columns, show='tree headings', height=15)
-        self.result_tree.heading('#0', text='ID')
-        self.result_tree.heading('title', text='书名')
-        self.result_tree.heading('author', text='演播/作者')
-        self.result_tree.heading('stats', text='完成/失败/总共')
-        self.result_tree.column('#0', width=50, stretch=False)
-        self.result_tree.column('title', width=150)
-        self.result_tree.column('author', width=100)
-        self.result_tree.column('stats', width=120)
-        self.result_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        columns = ('title', 'narrator')
+        self.tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=6)
+        self.tree.heading('title', text='书名')
+        self.tree.heading('narrator', text='演播')
+        self.tree.column('title', width=400)
+        self.tree.column('narrator', width=200)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        scroll_y = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.result_tree.yview)
-        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
-        self.result_tree.configure(yscrollcommand=scroll_y.set)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.bind('<Double-1>', self.on_book_select)
 
-        self.result_tree.bind('<Double-1>', self.on_book_select)
+        # ---------- 章节选择区域 ----------
+        chapter_frame = ttk.LabelFrame(main_frame, text="章节列表（勾选需要下载的章节）", padding="5")
+        chapter_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
-        # 右侧详情区
-        right_frame = ttk.Frame(main_paned, width=600)
-        main_paned.add(right_frame, weight=2)
+        # 操作按钮栏
+        btn_bar = ttk.Frame(chapter_frame)
+        btn_bar.pack(fill=tk.X, pady=2)
+        ttk.Button(btn_bar, text="全选", command=self.select_all).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_bar, text="反选", command=self.invert_selection).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_bar, text="全不选", command=self.select_none).pack(side=tk.LEFT, padx=2)
 
-        info_frame = ttk.LabelFrame(right_frame, text="书籍信息", padding="5")
-        info_frame.pack(fill=tk.X, padx=5, pady=5)
-        self.lbl_book_title = ttk.Label(info_frame, text="未选择书籍", font=('', 12, 'bold'))
-        self.lbl_book_title.pack(anchor=tk.W)
+        # 章节画布（带滚动条）
+        canvas_frame = ttk.Frame(chapter_frame)
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
+        self.chapter_canvas = tk.Canvas(canvas_frame, borderwidth=0, highlightthickness=0)
+        chapter_scroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=self.chapter_canvas.yview)
+        self.chapter_canvas.configure(yscrollcommand=chapter_scroll.set)
 
-        chap_frame = ttk.LabelFrame(right_frame, text="章节列表", padding="5")
-        chap_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.inner_frame = ttk.Frame(self.chapter_canvas)
+        self.inner_frame.bind("<Configure>", lambda e: self.chapter_canvas.configure(scrollregion=self.chapter_canvas.bbox("all")))
+        self.chapter_canvas.create_window((0,0), window=self.inner_frame, anchor="nw")
+        self.chapter_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        chapter_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        columns_chap = ('index', 'title', 'status')
-        self.chap_tree = ttk.Treeview(chap_frame, columns=columns_chap, show='tree headings', selectmode='extended')
-        self.chap_tree.heading('#0', text='')
-        self.chap_tree.heading('index', text='序号')
-        self.chap_tree.heading('title', text='章节标题')
-        self.chap_tree.heading('status', text='状态')
-        self.chap_tree.column('#0', width=0, stretch=False)
-        self.chap_tree.column('index', width=50, stretch=False)
-        self.chap_tree.column('title', width=300)
-        self.chap_tree.column('status', width=80)
-        self.chap_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        chap_scroll = ttk.Scrollbar(chap_frame, orient=tk.VERTICAL, command=self.chap_tree.yview)
-        chap_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.chap_tree.configure(yscrollcommand=chap_scroll.set)
-
-        btn_frame = ttk.Frame(right_frame)
-        btn_frame.pack(fill=tk.X, padx=5, pady=5)
-        ttk.Button(btn_frame, text="刷新章节", command=self.refresh_chapters).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="下载选中章节", command=self.download_selected).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="下载全部未完成", command=self.download_all_incomplete).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="停止", command=self.stop_download).pack(side=tk.LEFT, padx=5)
-
-        dir_frame = ttk.Frame(right_frame)
-        dir_frame.pack(fill=tk.X, padx=5, pady=5)
+        # ---------- 输出目录 ----------
+        dir_frame = ttk.Frame(main_frame)
+        dir_frame.pack(fill=tk.X, pady=5)
         ttk.Label(dir_frame, text="保存到:").pack(side=tk.LEFT)
-        ttk.Entry(dir_frame, textvariable=self.output_dir, width=40).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+        ttk.Entry(dir_frame, textvariable=self.output_dir, width=50).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
         ttk.Button(dir_frame, text="浏览", command=self.browse_dir).pack(side=tk.LEFT)
+        self.download_btn = ttk.Button(dir_frame, text="开始下载选中章节", command=self.start_download, state=tk.DISABLED)
+        self.download_btn.pack(side=tk.LEFT, padx=5)
 
-        self.progress_bar = ttk.Progressbar(right_frame, mode='determinate')
-        self.progress_bar.pack(fill=tk.X, padx=5, pady=5)
+        # 总体进度条
+        self.progress_bar = ttk.Progressbar(main_frame, mode='determinate')
+        self.progress_bar.pack(fill=tk.X, pady=5)
 
-        log_frame = ttk.LabelFrame(right_frame, text="日志", padding="5")
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=8)
+        # 日志区
+        log_frame = ttk.LabelFrame(main_frame, text="运行日志", padding="5")
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=8, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
     def browse_dir(self):
@@ -299,113 +247,131 @@ class DownloaderGUI:
         self.log_text.see(tk.END)
         self.root.update_idletasks()
 
-    def update_progress(self, current, total):
+    def update_total_progress(self, current, total):
         if total > 0:
             self.progress_bar['value'] = (current / total) * 100
         else:
             self.progress_bar['value'] = 0
         self.root.update_idletasks()
 
-    def do_search(self):
+    def update_file_progress(self, current, total):
+        """可用于显示单个文件进度，这里简化为不处理"""
+        pass
+
+    # ---------- 搜索线程 ----------
+    def start_search(self):
         keyword = self.search_keyword.get().strip()
         if not keyword:
+            messagebox.showerror("错误", "请输入搜索关键词")
             return
-        for item in self.result_tree.get_children():
-            self.result_tree.delete(item)
         self.log(f"搜索: {keyword}")
+        self.tree.delete(*self.tree.get_children())
+        self.download_btn.config(state=tk.DISABLED)
+        # 清空章节列表
+        for w in self.inner_frame.winfo_children():
+            w.destroy()
+        self.chapters = []
+        self.check_vars = []
+
+        self.downloader = AudioDownloader(log_callback=self.log)
+        self.thread = threading.Thread(target=self._search_thread, args=(keyword,), daemon=True)
+        self.thread.start()
+
+    def _search_thread(self, keyword):
         try:
-            dl = AudioDownloader(self.db)
-            results = dl.search(keyword)
-            for r in results:
-                stats = self.db.get_book_stats(r['id'])
-                stats_str = f"{stats['success']}/{stats['failed']}/{stats['total']}"
-                self.result_tree.insert('', 'end', iid=r['id'], text=r['id'],
-                                        values=(r['title'], r['author'], stats_str))
-            self.log(f"找到 {len(results)} 条结果")
+            results = self.downloader.search_books(keyword)
+            self.root.after(0, self._populate_search_results, results)
         except Exception as e:
-            self.log(f"搜索失败: {e}")
+            self.root.after(0, self.log, f"搜索出错: {e}")
+
+    def _populate_search_results(self, results):
+        for title, narrator, cover, url in results:
+            self.tree.insert('', tk.END, values=(title, narrator), tags=(url,))
+        self.log(f"找到 {len(results)} 个结果")
 
     def on_book_select(self, event):
-        sel = self.result_tree.selection()
-        if not sel:
+        selection = self.tree.selection()
+        if not selection:
             return
-        book_id = sel[0]
-        item = self.result_tree.item(book_id)
-        title = item['values'][0]
-        author = item['values'][1]
-        self.current_book = {
-            'id': book_id,
-            'title': title,
-            'author': author,
-            'url': f"https://m.i275.com/book/{book_id}.html"
-        }
-        self.lbl_book_title.config(text=f"{title} - {author}")
-        self.refresh_chapters()
+        item = selection[0]
+        values = self.tree.item(item, 'values')
+        url = self.tree.item(item, 'tags')[0]
+        title = values[0]
+        self.log(f"加载书籍: {title}")
+        self.download_btn.config(state=tk.DISABLED)
+        # 清空章节
+        for w in self.inner_frame.winfo_children():
+            w.destroy()
+        self.chapters = []
+        self.check_vars = []
+        self.current_book_title = title
 
-    def refresh_chapters(self):
-        if not self.current_book:
-            return
-        for item in self.chap_tree.get_children():
-            self.chap_tree.delete(item)
-        self.log(f"正在获取 {self.current_book['title']} 的章节列表...")
+        self.downloader = AudioDownloader(log_callback=self.log)
+        self.thread = threading.Thread(target=self._fetch_chapters_thread, args=(url,), daemon=True)
+        self.thread.start()
+
+    def _fetch_chapters_thread(self, url):
         try:
-            dl = AudioDownloader(self.db)
-            book_title, chapters = dl.fetch_book_details(self.current_book['url'])
-            self.current_chapters = chapters
-            stats = self.db.get_book_stats(self.current_book['id'])
-            for i, chap in enumerate(chapters):
-                chap_stat = stats['chapters'].get(str(i), {}).get('status', '未下载')
-                status_disp = {'success': '已完成', 'failed': '失败', 'pending': '待下载'}.get(chap_stat, chap_stat)
-                self.chap_tree.insert('', 'end', iid=str(i), values=(i+1, chap['title'], status_disp))
-            self.update_result_stats(self.current_book['id'])
-            self.log(f"共 {len(chapters)} 章")
+            book_title, chapters = self.downloader.fetch_chapters(url)
+            self.root.after(0, self._populate_chapters, book_title, chapters)
         except Exception as e:
-            self.log(f"获取章节失败: {e}")
+            self.root.after(0, self.log, f"获取章节失败: {e}")
 
-    def update_result_stats(self, book_id):
-        stats = self.db.get_book_stats(book_id)
-        stats_str = f"{stats['success']}/{stats['failed']}/{stats['total']}"
-        if self.result_tree.exists(book_id):
-            values = list(self.result_tree.item(book_id, 'values'))
-            values[2] = stats_str
-            self.result_tree.item(book_id, values=values)
+    def _populate_chapters(self, book_title, chapters):
+        self.current_book_title = book_title
+        self.chapters = chapters
+        self.check_vars = []
+        for i, (title, _) in enumerate(chapters):
+            var = tk.BooleanVar(value=True)
+            self.check_vars.append(var)
+            cb = ttk.Checkbutton(self.inner_frame, text=f"{i+1:03d}. {title}", variable=var)
+            cb.pack(anchor=tk.W, pady=1)
+        self.log(f"共 {len(chapters)} 章，默认全选")
+        self.download_btn.config(state=tk.NORMAL)
 
-    def download_selected(self):
-        if not self.current_book:
+    def select_all(self):
+        for var in self.check_vars:
+            var.set(True)
+
+    def select_none(self):
+        for var in self.check_vars:
+            var.set(False)
+
+    def invert_selection(self):
+        for var in self.check_vars:
+            var.set(not var.get())
+
+    # ---------- 下载 ----------
+    def start_download(self):
+        if not self.chapters:
             return
-        selected = self.chap_tree.selection()
+        selected = []
+        for i, var in enumerate(self.check_vars):
+            if var.get():
+                selected.append(self.chapters[i])
         if not selected:
-            messagebox.showinfo("提示", "请先选择要下载的章节")
+            messagebox.showinfo("提示", "未选择任何章节")
             return
-        indices = [int(i) for i in selected]
-        self.start_download(indices)
-
-    def download_all_incomplete(self):
-        if not self.current_book:
-            return
-        stats = self.db.get_book_record(self.current_book['id'])
-        chapters_dict = stats.get('chapters', {})
-        indices = [i for i in range(len(self.current_chapters))
-                   if chapters_dict.get(str(i), {}).get('status') != 'success']
-        if not indices:
-            messagebox.showinfo("提示", "所有章节都已下载完成")
-            return
-        self.start_download(indices)
-
-    def start_download(self, indices):
         output_dir = self.output_dir.get()
         if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+            try:
+                os.makedirs(output_dir)
+            except:
+                messagebox.showerror("错误", "无法创建输出目录")
+                return
+
+        self.download_btn.config(state=tk.DISABLED)
+        self.progress_bar['value'] = 0
+        self.log(f"开始下载 {len(selected)} 个章节...")
+
         self.downloader = AudioDownloader(
-            self.db,
-            progress_callback=self.update_progress,
-            log_callback=self.log
+            log_callback=self.log,
+            progress_callback=self.update_total_progress,
+            file_progress_callback=self.update_file_progress
         )
-        book_id = self.current_book['id']
-        book_title = safe_filename(self.current_book['title'])
         self.thread = threading.Thread(
-            target=self.downloader.download_chapters,
-            args=(book_id, book_title, self.current_chapters, output_dir, indices),
+            target=self.downloader.download_selected,
+            args=(self.current_book_title, selected, output_dir),
             daemon=True
         )
         self.thread.start()
@@ -414,18 +380,18 @@ class DownloaderGUI:
     def stop_download(self):
         if self.downloader:
             self.downloader.stop()
-        self.log("停止指令已发出")
+        self.log("正在停止...")
 
     def check_thread(self):
         if self.thread and self.thread.is_alive():
             self.root.after(200, self.check_thread)
         else:
-            self.log("下载线程结束")
-            self.refresh_chapters()
+            self.download_btn.config(state=tk.NORMAL)
+            self.log("====== 任务结束 ======")
 
     def run(self):
         self.root.mainloop()
 
 if __name__ == "__main__":
-    app = DownloaderGUI()
+    app = DownloaderApp()
     app.run()

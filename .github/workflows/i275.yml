@@ -1,12 +1,7 @@
 name: Build i275 EXE
+
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'i275/i275.py'
-      - 'i275/requirements.txt'
-      - '.github/workflows/build-exe.yml'
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -30,10 +25,10 @@ jobs:
     - name: 使用 PyInstaller 打包
       run: |
         cd i275
-        pyinstaller --onefile --windowed --name "275AudioDownloader" i275.py
+        pyinstaller --onefile --windowed --name "i275" i275.py
 
     - name: 上传 EXE 文件
       uses: actions/upload-artifact@v4
       with:
         name: 275AudioDownloader
-        path: i275/dist/275AudioDownloader.exe
+        path: i275/dist/i275.exe

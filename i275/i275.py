@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
+from queue import Queue
 
 ILLEGAL_CHAR_MAP = {
     '\\': '＼', '/': '／', ':': '：', '*': '＊',
@@ -19,34 +20,34 @@ def safe_filename(s: str) -> str:
     return s.strip().rstrip('.')
 
 class AudioDownloader:
-    def __init__(self, log_callback=None, stats_callback=None):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0',
-            'Referer': 'https://m.i275.com/',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        })
+    def __init__(self, log_callback=None, stats_callback=None, progress_callback=None):
         self.log_callback = log_callback
         self.stats_callback = stats_callback
+        self.progress_callback = progress_callback
         self.cancel_flag = False
         self.paused_flag = False
         self.failed_list = []
+        self.lock = threading.Lock()
+        self.completed = 0
+        self.failed = 0
+        self.total = 0
+        self.active_threads = 0
 
     def log(self, msg):
         if self.log_callback:
             self.log_callback(msg)
 
-    def update_stats(self, completed, failed, total):
+    def update_stats(self):
         if self.stats_callback:
-            self.stats_callback(completed, failed, total)
+            self.stats_callback(self.completed, self.failed, self.total)
 
     def search_books(self, keyword: str):
         url = f"https://m.i275.com/search.php?q={requests.utils.quote(keyword)}"
-        resp = self.session.get(url, timeout=15)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0',
+            'Referer': 'https://m.i275.com/'
+        }
+        resp = requests.get(url, timeout=15, headers=headers)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
         results = []
@@ -65,7 +66,11 @@ class AudioDownloader:
         return results
 
     def fetch_chapters(self, detail_url: str):
-        resp = self.session.get(detail_url, timeout=15)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0',
+            'Referer': 'https://m.i275.com/'
+        }
+        resp = requests.get(detail_url, timeout=15, headers=headers)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
         title_h1 = soup.select_one('.bg-white h1') or soup.select_one('h1')
@@ -100,9 +105,13 @@ class AudioDownloader:
         return book_title, narrator, chapters
 
     def extract_audio_url(self, play_url: str):
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0',
+            'Referer': 'https://m.i275.com/'
+        }
         for attempt in range(3):
             try:
-                resp = self.session.get(play_url, timeout=15)
+                resp = requests.get(play_url, timeout=15, headers=headers)
                 resp.encoding = 'utf-8'
                 html = resp.text
                 match = re.search(r"url:\s*['\"]([^'\"]+\.m4a[^'\"]*)['\"]", html)
@@ -122,15 +131,13 @@ class AudioDownloader:
                 raise e
 
     def download_audio(self, audio_url: str, save_path: str):
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0',
+            'Referer': 'https://m.i275.com/'
+        }
         for attempt in range(3):
             try:
-                headers = {
-                    'Referer': 'https://m.i275.com/',
-                    'Accept': '*/*',
-                    'Accept-Encoding': 'identity',
-                    'Range': 'bytes=0-'
-                }
-                resp = self.session.get(audio_url, stream=True, timeout=30, headers=headers)
+                resp = requests.get(audio_url, stream=True, timeout=30, headers=headers)
                 if resp.status_code != 200:
                     raise Exception(f"HTTP {resp.status_code}")
                 content_type = resp.headers.get('Content-Type', '')
@@ -156,73 +163,77 @@ class AudioDownloader:
                 return True
             except Exception as e:
                 if attempt < 2 and not self.cancel_flag:
-                    self.log(f"  重试 {attempt+1}/3: {str(e)}")
                     time.sleep(2)
                     continue
                 raise e
 
+    def worker(self, queue, folder_name, output_dir, play_url_cache):
+        while not self.cancel_flag:
+            if self.paused_flag:
+                time.sleep(0.5)
+                continue
+            try:
+                chap_title, play_url = queue.get_nowait()
+            except:
+                break
+            try:
+                if play_url in play_url_cache:
+                    audio_url = play_url_cache[play_url]
+                else:
+                    audio_url = self.extract_audio_url(play_url)
+                    play_url_cache[play_url] = audio_url
+                ext = os.path.splitext(urlparse(audio_url).path)[1] or '.m4a'
+                filename = f"{chap_title}{ext}"
+                save_path = os.path.join(output_dir, folder_name, filename)
+                self.download_audio(audio_url, save_path)
+                with self.lock:
+                    self.completed += 1
+                    self.update_stats()
+                self.log(f"✓ {chap_title}")
+            except Exception as e:
+                with self.lock:
+                    self.failed += 1
+                    self.failed_list.append((chap_title, play_url))
+                    self.update_stats()
+                self.log(f"✗ {chap_title}: {str(e)}")
+            finally:
+                queue.task_done()
+                if self.progress_callback:
+                    self.progress_callback()
+
     def download_selected(self, folder_name: str, selected_chapters: list, output_dir: str):
         book_dir = os.path.join(output_dir, folder_name)
         os.makedirs(book_dir, exist_ok=True)
-        total = len(selected_chapters)
-        completed = 0
-        failed = 0
+        self.total = len(selected_chapters)
+        self.completed = 0
+        self.failed = 0
         self.failed_list = []
-        self.update_stats(completed, failed, total)
-        for chap_title, play_url in selected_chapters:
-            while self.paused_flag and not self.cancel_flag:
+        self.update_stats()
+        
+        queue = Queue()
+        play_url_cache = {}
+        for item in selected_chapters:
+            queue.put(item)
+        
+        threads = []
+        for _ in range(min(3, self.total)):
+            t = threading.Thread(target=self.worker, args=(queue, folder_name, output_dir, play_url_cache))
+            t.daemon = True
+            t.start()
+            threads.append(t)
+        
+        while not self.cancel_flag and not queue.empty():
+            if self.paused_flag:
                 time.sleep(0.5)
-            if self.cancel_flag:
-                self.log("任务已取消")
-                break
-            self.log(f"[{completed+failed+1}/{total}] {chap_title}")
-            try:
-                audio_url = self.extract_audio_url(play_url)
-                ext = os.path.splitext(urlparse(audio_url).path)[1] or '.m4a'
-                filename = f"{chap_title}{ext}"
-                save_path = os.path.join(book_dir, filename)
-                self.download_audio(audio_url, save_path)
-                self.log(f"  ✓ 已保存")
-                completed += 1
-            except Exception as e:
-                self.log(f"  ✗ 失败: {str(e)}")
-                failed += 1
-                self.failed_list.append((chap_title, play_url))
-            self.update_stats(completed, failed, total)
-            time.sleep(1)
-        return completed, failed, self.failed_list
+                continue
+            time.sleep(0.5)
+        
+        for t in threads:
+            t.join(timeout=1)
+        return self.completed, self.failed, self.failed_list
 
     def retry_failed(self, folder_name: str, failed_list: list, output_dir: str):
-        if not failed_list:
-            return 0, 0, []
-        book_dir = os.path.join(output_dir, folder_name)
-        os.makedirs(book_dir, exist_ok=True)
-        total = len(failed_list)
-        completed = 0
-        failed = 0
-        new_failed = []
-        self.update_stats(0, 0, total)
-        for chap_title, play_url in failed_list:
-            while self.paused_flag and not self.cancel_flag:
-                time.sleep(0.5)
-            if self.cancel_flag:
-                break
-            self.log(f"[重试] {chap_title}")
-            try:
-                audio_url = self.extract_audio_url(play_url)
-                ext = os.path.splitext(urlparse(audio_url).path)[1] or '.m4a'
-                filename = f"{chap_title}{ext}"
-                save_path = os.path.join(book_dir, filename)
-                self.download_audio(audio_url, save_path)
-                self.log(f"  ✓ 成功")
-                completed += 1
-            except Exception as e:
-                self.log(f"  ✗ 失败: {str(e)}")
-                failed += 1
-                new_failed.append((chap_title, play_url))
-            self.update_stats(completed, failed, total)
-            time.sleep(1)
-        return completed, failed, new_failed
+        return self.download_selected(folder_name, failed_list, output_dir)
 
     def pause(self):
         self.paused_flag = True
@@ -411,13 +422,13 @@ class DownloaderApp:
         self.chapter_listbox.delete(0, tk.END)
         self.current_book_url = url
 
-        self.downloader = AudioDownloader(log_callback=self.log)
         self.thread = threading.Thread(target=self._fetch_chapters_thread, args=(url,), daemon=True)
         self.thread.start()
 
     def _fetch_chapters_thread(self, url):
         try:
-            book_title, narrator, chapters = self.downloader.fetch_chapters(url)
+            dl = AudioDownloader()
+            book_title, narrator, chapters = dl.fetch_chapters(url)
             self.root.after(0, self._populate_chapters, book_title, narrator, chapters)
         except Exception as e:
             self.root.after(0, self.log, f"获取章节失败: {e}")

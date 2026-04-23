@@ -62,9 +62,17 @@ class AudioDownloader:
         resp = self.session.get(detail_url, timeout=15)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
-        book_title = safe_filename(soup.select_one('h1').text.strip() if soup.select_one('h1') else '未知书名')
-        narrator_span = soup.select_one('span.text-gray-800')
-        narrator = narrator_span.text.strip() if narrator_span else ''
+        title_h1 = soup.select_one('.bg-white h1') or soup.select_one('h1')
+        book_title = safe_filename(title_h1.text.strip()) if title_h1 else '未知书名'
+        narrator = ''
+        narrator_p = soup.find('p', string=re.compile(r'演播[：:]'))
+        if narrator_p:
+            narrator_span = narrator_p.find('span', class_='text-gray-800')
+            if narrator_span:
+                narrator = narrator_span.text.strip()
+            else:
+                full_text = narrator_p.get_text(strip=True)
+                narrator = re.sub(r'^.*?演播[：:]\s*', '', full_text).strip()
         chapters = []
         for a in soup.select('a[id^="chapter-pos-"]'):
             href = a.get('href')

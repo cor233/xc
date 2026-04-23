@@ -54,7 +54,8 @@ class AudioDownloader:
             title_tag = a.select_one('h3') or a.select_one('.font-medium')
             title = title_tag.text.strip() if title_tag else '未知书名'
             narrator_tag = a.select_one('.text-xs.text-gray-500')
-            narrator = narrator_tag.text.strip() if narrator_tag else ''
+            narrator_raw = narrator_tag.text.strip() if narrator_tag else ''
+            narrator = re.sub(r'^演播[：:]*\s*', '', narrator_raw).strip()
             results.append((title, narrator, detail_url))
         return results
 
@@ -73,6 +74,14 @@ class AudioDownloader:
             else:
                 full_text = narrator_p.get_text(strip=True)
                 narrator = re.sub(r'^.*?演播[：:]\s*', '', full_text).strip()
+        if not narrator:
+            narrator_span = soup.select_one('p:contains("演播") span.text-gray-800')
+            if narrator_span:
+                narrator = narrator_span.text.strip()
+        if not narrator:
+            match = re.search(r'演播[：:]\s*<span[^>]*class="text-gray-800"[^>]*>([^<]+)</span>', resp.text)
+            if match:
+                narrator = match.group(1).strip()
         chapters = []
         for a in soup.select('a[id^="chapter-pos-"]'):
             href = a.get('href')

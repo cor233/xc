@@ -107,6 +107,11 @@ class AudioDownloader:
             return match.group(1).replace('\\', '')
         match = re.search(r"url:\s*['\"]([^'\"]+)['\"]", html)
         if match:
+            raw_url = match.group(1).replace('\\', '')
+            if re.search(r'\.(m4a|mp3|aac|wav|ogg)', raw_url, re.I):
+                return raw_url
+        match = re.search(r"['\"]([^'\"]+\.m4a[^'\"]*)['\"]", html)
+        if match:
             return match.group(1).replace('\\', '')
         raise Exception("未找到音频链接")
 

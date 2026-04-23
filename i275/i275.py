@@ -22,12 +22,13 @@ class AudioDownloader:
     def __init__(self, log_callback=None, stats_callback=None):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Referer': 'https://m.i275.com/'
         })
         self.log_callback = log_callback
         self.stats_callback = stats_callback
         self.cancel_flag = False
+        self.paused_flag = False
         self.failed_list = []
 
     def log(self, msg):
@@ -62,9 +63,15 @@ class AudioDownloader:
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
         book_title = safe_filename(soup.select_one('h1').text.strip() if soup.select_one('h1') else '未知书名')
-        narrator_elem = soup.find(string=re.compile(r'演播[：:]\s*'))
-        narrator_raw = narrator_elem.parent.get_text(strip=True) if narrator_elem else ''
-        narrator = re.sub(r'^.*?演播[：:]\s*', '', narrator_raw).strip()
+        narrator = ''
+        narrator_elem = soup.find('p', string=re.compile(r'演播[：:]'))
+        if narrator_elem:
+            narrator_span = narrator_elem.find('span')
+            if narrator_span:
+                narrator = narrator_span.text.strip()
+            else:
+                full_text = narrator_elem.get_text(strip=True)
+                narrator = re.sub(r'^.*?演播[：:]\s*', '', full_text).strip()
         chapters = []
         for a in soup.select('a[id^="chapter-pos-"]'):
             href = a.get('href')
@@ -118,6 +125,8 @@ class AudioDownloader:
         self.failed_list = []
         self.update_stats(completed, failed, total)
         for chap_title, play_url in selected_chapters:
+            while self.paused_flag and not self.cancel_flag:
+                time.sleep(0.5)
             if self.cancel_flag:
                 self.log("任务已取消")
                 break
@@ -149,6 +158,8 @@ class AudioDownloader:
         new_failed = []
         self.update_stats(0, 0, total)
         for chap_title, play_url in failed_list:
+            while self.paused_flag and not self.cancel_flag:
+                time.sleep(0.5)
             if self.cancel_flag:
                 break
             self.log(f"[重试] {chap_title}")
@@ -168,13 +179,20 @@ class AudioDownloader:
             time.sleep(1)
         return completed, failed, new_failed
 
+    def pause(self):
+        self.paused_flag = True
+
+    def resume(self):
+        self.paused_flag = False
+
     def stop(self):
         self.cancel_flag = True
+        self.paused_flag = False
 
 class DownloaderApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("i275听书网下载工具")
+        self.root.title("275听书网批量下载工具")
         self.root.geometry("1000x700")
         self.root.minsize(900, 600)
         self.root.configure(bg='#f5f5f5')
@@ -215,7 +233,8 @@ class DownloaderApp:
         ttk.Label(search_frame, text="关键词:").grid(row=0, column=0, padx=5, sticky=tk.W)
         ttk.Entry(search_frame, textvariable=self.search_keyword, width=35).grid(row=0, column=1, padx=5, sticky=tk.W)
         ttk.Button(search_frame, text="搜索", command=self.start_search).grid(row=0, column=2, padx=5)
-        ttk.Button(search_frame, text="停止", command=self.stop_download, state=tk.DISABLED).grid(row=0, column=3, padx=5)
+        self.stop_btn = ttk.Button(search_frame, text="停止", command=self.stop_download, state=tk.DISABLED)
+        self.stop_btn.grid(row=0, column=3, padx=5)
 
         list_frame = ttk.LabelFrame(left_frame, text="搜索结果（双击选择）", padding=10)
         list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
@@ -273,6 +292,10 @@ class DownloaderApp:
         action_frame.pack(fill=tk.X, pady=(0, 10))
         self.download_btn = ttk.Button(action_frame, text="下载选中章节", command=self.start_download, state=tk.DISABLED)
         self.download_btn.pack(fill=tk.X, pady=2)
+        self.pause_btn = ttk.Button(action_frame, text="暂停", command=self.pause_download, state=tk.DISABLED)
+        self.pause_btn.pack(fill=tk.X, pady=2)
+        self.resume_btn = ttk.Button(action_frame, text="继续", command=self.resume_download, state=tk.DISABLED)
+        self.resume_btn.pack(fill=tk.X, pady=2)
         self.retry_btn = ttk.Button(action_frame, text="重试失败章节", command=self.retry_failed, state=tk.DISABLED)
         self.retry_btn.pack(fill=tk.X, pady=2)
 
@@ -395,7 +418,10 @@ class DownloaderApp:
                 return
 
         self.download_btn.config(state=tk.DISABLED)
+        self.pause_btn.config(state=tk.NORMAL)
+        self.resume_btn.config(state=tk.DISABLED)
         self.retry_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
         self.update_stats_display(0, 0, len(selected))
         self.log(f"开始下载 {len(selected)} 个章节...")
 
@@ -419,9 +445,26 @@ class DownloaderApp:
     def _on_download_finish(self, completed, failed, failed_list):
         self.failed_items = failed_list
         self.download_btn.config(state=tk.NORMAL)
+        self.pause_btn.config(state=tk.DISABLED)
+        self.resume_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.DISABLED)
         if failed_list:
             self.retry_btn.config(state=tk.NORMAL)
         self.log(f"下载结束。成功 {completed}，失败 {failed}")
+
+    def pause_download(self):
+        if self.downloader:
+            self.downloader.pause()
+            self.pause_btn.config(state=tk.DISABLED)
+            self.resume_btn.config(state=tk.NORMAL)
+            self.log("已暂停，正在进行的章节将继续完成...")
+
+    def resume_download(self):
+        if self.downloader:
+            self.downloader.resume()
+            self.pause_btn.config(state=tk.NORMAL)
+            self.resume_btn.config(state=tk.DISABLED)
+            self.log("继续下载...")
 
     def retry_failed(self):
         if not self.failed_items:
@@ -430,6 +473,9 @@ class DownloaderApp:
         output_dir = self.output_dir.get()
         self.retry_btn.config(state=tk.DISABLED)
         self.download_btn.config(state=tk.DISABLED)
+        self.pause_btn.config(state=tk.NORMAL)
+        self.resume_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
         self.log(f"开始重试 {len(self.failed_items)} 个失败章节...")
         self.downloader = AudioDownloader(
             log_callback=self.log,
@@ -451,6 +497,9 @@ class DownloaderApp:
     def _on_retry_finish(self, new_failed):
         self.failed_items = new_failed
         self.download_btn.config(state=tk.NORMAL)
+        self.pause_btn.config(state=tk.DISABLED)
+        self.resume_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.DISABLED)
         if new_failed:
             self.retry_btn.config(state=tk.NORMAL)
         else:
@@ -467,6 +516,9 @@ class DownloaderApp:
             self.root.after(200, self.check_thread)
         else:
             self.download_btn.config(state=tk.NORMAL)
+            self.pause_btn.config(state=tk.DISABLED)
+            self.resume_btn.config(state=tk.DISABLED)
+            self.stop_btn.config(state=tk.DISABLED)
             if self.failed_items:
                 self.retry_btn.config(state=tk.NORMAL)
             self.log("====== 任务结束 ======")

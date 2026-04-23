@@ -23,7 +23,12 @@ class AudioDownloader:
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0',
-            'Referer': 'https://m.i275.com/'
+            'Referer': 'https://m.i275.com/',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         })
         self.log_callback = log_callback
         self.stats_callback = stats_callback
@@ -95,36 +100,66 @@ class AudioDownloader:
         return book_title, narrator, chapters
 
     def extract_audio_url(self, play_url: str):
-        resp = self.session.get(play_url, timeout=15)
-        resp.encoding = 'utf-8'
-        html = resp.text
-        match = re.search(r"url:\s*['\"]([^'\"]+\.m4a[^'\"]*)['\"]", html)
-        if match:
-            return match.group(1).replace('\\', '')
-        match = re.search(r"url:\s*['\"]([^'\"]+)['\"]", html)
-        if match:
-            return match.group(1).replace('\\', '')
-        raise Exception("未找到音频链接")
+        for attempt in range(3):
+            try:
+                resp = self.session.get(play_url, timeout=15)
+                resp.encoding = 'utf-8'
+                html = resp.text
+                match = re.search(r"url:\s*['\"]([^'\"]+\.m4a[^'\"]*)['\"]", html)
+                if match:
+                    return match.group(1).replace('\\', '')
+                match = re.search(r"url:\s*['\"]([^'\"]+)['\"]", html)
+                if match:
+                    return match.group(1).replace('\\', '')
+                if attempt < 2:
+                    time.sleep(2)
+                    continue
+                raise Exception("未找到音频链接")
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(2)
+                    continue
+                raise e
 
     def download_audio(self, audio_url: str, save_path: str):
-        resp = self.session.get(audio_url, stream=True, timeout=30)
-        content_type = resp.headers.get('Content-Type', '')
-        if 'audio' not in content_type and 'octet-stream' not in content_type:
-            raise Exception(f"非音频响应: {content_type}")
-        total_size = int(resp.headers.get('content-length', 0))
-        downloaded = 0
-        with open(save_path, 'wb') as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if self.cancel_flag:
-                    raise Exception("下载被取消")
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-        if total_size > 0 and downloaded < total_size * 0.9:
-            raise Exception(f"文件不完整: {downloaded}/{total_size}")
-        if os.path.getsize(save_path) < 10240:
-            os.remove(save_path)
-            raise Exception("文件过小，可能为错误页面")
+        for attempt in range(3):
+            try:
+                headers = {
+                    'Referer': 'https://m.i275.com/',
+                    'Accept': '*/*',
+                    'Accept-Encoding': 'identity',
+                    'Range': 'bytes=0-'
+                }
+                resp = self.session.get(audio_url, stream=True, timeout=30, headers=headers)
+                if resp.status_code != 200:
+                    raise Exception(f"HTTP {resp.status_code}")
+                content_type = resp.headers.get('Content-Type', '')
+                if 'audio' not in content_type and 'octet-stream' not in content_type and 'mpeg' not in content_type:
+                    if attempt < 2:
+                        time.sleep(2)
+                        continue
+                    raise Exception(f"非音频响应: {content_type}")
+                total_size = int(resp.headers.get('content-length', 0))
+                downloaded = 0
+                with open(save_path, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if self.cancel_flag:
+                            raise Exception("下载被取消")
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                if total_size > 0 and downloaded < total_size * 0.9:
+                    raise Exception(f"文件不完整: {downloaded}/{total_size}")
+                if os.path.getsize(save_path) < 10240:
+                    os.remove(save_path)
+                    raise Exception("文件过小，可能为错误页面")
+                return True
+            except Exception as e:
+                if attempt < 2 and not self.cancel_flag:
+                    self.log(f"  重试 {attempt+1}/3: {str(e)}")
+                    time.sleep(2)
+                    continue
+                raise e
 
     def download_selected(self, folder_name: str, selected_chapters: list, output_dir: str):
         book_dir = os.path.join(output_dir, folder_name)
@@ -243,14 +278,12 @@ class DownloaderApp:
         ttk.Label(search_frame, text="关键词:").grid(row=0, column=0, padx=5, sticky=tk.W)
         ttk.Entry(search_frame, textvariable=self.search_keyword, width=35).grid(row=0, column=1, padx=5, sticky=tk.W)
         ttk.Button(search_frame, text="搜索", command=self.start_search).grid(row=0, column=2, padx=5)
-        self.stop_btn = ttk.Button(search_frame, text="停止", command=self.stop_download, state=tk.DISABLED)
-        self.stop_btn.grid(row=0, column=3, padx=5)
 
         list_frame = ttk.LabelFrame(left_frame, text="搜索结果（双击选择）", padding=10)
         list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
         columns = ('title', 'narrator')
-        self.tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=10)
+        self.tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=6)
         self.tree.heading('title', text='书名')
         self.tree.heading('narrator', text='演播')
         self.tree.column('title', width=350)
@@ -431,7 +464,6 @@ class DownloaderApp:
         self.pause_btn.config(state=tk.NORMAL)
         self.resume_btn.config(state=tk.DISABLED)
         self.retry_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
         self.update_stats_display(0, 0, len(selected))
         self.log(f"开始下载 {len(selected)} 个章节...")
 
@@ -457,7 +489,6 @@ class DownloaderApp:
         self.download_btn.config(state=tk.NORMAL)
         self.pause_btn.config(state=tk.DISABLED)
         self.resume_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.DISABLED)
         if failed_list:
             self.retry_btn.config(state=tk.NORMAL)
         self.log(f"下载结束。成功 {completed}，失败 {failed}")
@@ -485,7 +516,6 @@ class DownloaderApp:
         self.download_btn.config(state=tk.DISABLED)
         self.pause_btn.config(state=tk.NORMAL)
         self.resume_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
         self.log(f"开始重试 {len(self.failed_items)} 个失败章节...")
         self.downloader = AudioDownloader(
             log_callback=self.log,
@@ -509,17 +539,11 @@ class DownloaderApp:
         self.download_btn.config(state=tk.NORMAL)
         self.pause_btn.config(state=tk.DISABLED)
         self.resume_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.DISABLED)
         if new_failed:
             self.retry_btn.config(state=tk.NORMAL)
         else:
             self.retry_btn.config(state=tk.DISABLED)
         self.log("重试任务结束。")
-
-    def stop_download(self):
-        if self.downloader:
-            self.downloader.stop()
-        self.log("正在停止...")
 
     def check_thread(self):
         if self.thread and self.thread.is_alive():
@@ -528,7 +552,6 @@ class DownloaderApp:
             self.download_btn.config(state=tk.NORMAL)
             self.pause_btn.config(state=tk.DISABLED)
             self.resume_btn.config(state=tk.DISABLED)
-            self.stop_btn.config(state=tk.DISABLED)
             if self.failed_items:
                 self.retry_btn.config(state=tk.NORMAL)
             self.log("====== 任务结束 ======")

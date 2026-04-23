@@ -12,7 +12,7 @@ import hashlib
 from tkinter import *
 from tkinter import scrolledtext, messagebox, filedialog
 from tkinter import ttk
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
 
@@ -24,12 +24,20 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 ]
 
+MAX_FILENAME_LEN = 200
+COMPLETED_FILE = ".completed.json"
+FAILED_FILE = ".failed.json"
+
 def sanitize_filename(name):
     char_map = {
         '\\': '＼', '/': '／', ':': '：', '*': '＊',
         '?': '？', '"': '＂', '<': '＜', '>': '＞', '|': '｜'
     }
-    return re.sub(r'[\\/:*?"<>|]', lambda m: char_map[m.group(0)], name).strip()
+    cleaned = re.sub(r'[\\/:*?"<>|]', lambda m: char_map[m.group(0)], name).strip()
+    if len(cleaned) > MAX_FILENAME_LEN:
+        name_part, ext_part = os.path.splitext(cleaned)
+        cleaned = name_part[:MAX_FILENAME_LEN - len(ext_part)] + ext_part
+    return cleaned
 
 class RateLimiter:
     def __init__(self, min_delay=1.0, max_delay=3.0):
@@ -44,9 +52,12 @@ class RateLimiter:
             if self.last_request_time > 0:
                 elapsed = now - self.last_request_time
                 required = random.uniform(self.min_delay, self.max_delay)
-                if elapsed < required:
-                    time.sleep(required - elapsed)
-            self.last_request_time = time.time()
+                wait_time = max(0, required - elapsed)
+            else:
+                wait_time = 0
+            self.last_request_time = time.time() + wait_time
+        if wait_time > 0:
+            time.sleep(wait_time)
 
 class DownloadWorker:
     def __init__(self, album_url, max_workers, request_delay, retry_times, timeout, save_dir, log_queue):
@@ -61,16 +72,16 @@ class DownloadWorker:
         self.curl_session = None
         self.executor = None
         self.rate_limiter = RateLimiter(request_delay[0], request_delay[1])
-        self.completed_file = os.path.join(save_dir, '.completed.json')
-        self.failed_file = os.path.join(save_dir, '.failed.json')
-        self.lock = threading.Lock()
+        self.completed_file = os.path.join(save_dir, COMPLETED_FILE)
+        self.failed_file = os.path.join(save_dir, FAILED_FILE)
+        self.lock = threading.RLock()
         self.completed_set = set()
         self.failed_set = set()
         self.total_chapters = 0
         self.completed = 0
         self.failed = 0
-        self.load_completed()
-        self.load_failed()
+        self._load_completed()
+        self._load_failed()
 
     def __enter__(self):
         self.curl_session = curl_requests.Session()
@@ -80,7 +91,7 @@ class DownloadWorker:
         if self.curl_session:
             self.curl_session.close()
         if self.executor:
-            self.executor.shutdown(wait=True)
+            self.executor.shutdown(wait=True, cancel_futures=False)
 
     def log(self, msg):
         self.log_queue.put(msg)
@@ -95,25 +106,59 @@ class DownloadWorker:
     def clear_fail_log(self):
         self.log_queue.put("FAIL_CLEAR")
 
-    def load_completed(self):
+    def _load_completed(self):
         if os.path.exists(self.completed_file):
-            with open(self.completed_file, 'r', encoding='utf-8') as f:
-                self.completed_set = set(json.load(f))
+            try:
+                with open(self.completed_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.completed_set = set(data)
+            except:
+                self.completed_set = set()
 
-    def save_completed(self):
+    def _save_completed(self):
         with self.lock:
-            with open(self.completed_file, 'w', encoding='utf-8') as f:
-                json.dump(list(self.completed_set), f, ensure_ascii=False)
+            temp_file = self.completed_file + ".tmp"
+            try:
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    json.dump(list(self.completed_set), f, ensure_ascii=False)
+                os.replace(temp_file, self.completed_file)
+            except Exception as e:
+                self.log(f"保存完成记录失败: {e}")
 
-    def load_failed(self):
+    def _load_failed(self):
         if os.path.exists(self.failed_file):
-            with open(self.failed_file, 'r', encoding='utf-8') as f:
-                self.failed_set = set(json.load(f))
+            try:
+                with open(self.failed_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self.failed_set = set(data)
+            except:
+                self.failed_set = set()
 
-    def save_failed(self):
+    def _save_failed(self):
         with self.lock:
-            with open(self.failed_file, 'w', encoding='utf-8') as f:
-                json.dump(list(self.failed_set), f, ensure_ascii=False)
+            temp_file = self.failed_file + ".tmp"
+            try:
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    json.dump(list(self.failed_set), f, ensure_ascii=False)
+                os.replace(temp_file, self.failed_file)
+            except Exception as e:
+                self.log(f"保存失败记录失败: {e}")
+
+    def _mark_completed(self, identifier):
+        with self.lock:
+            self.completed_set.add(identifier)
+            if identifier in self.failed_set:
+                self.failed_set.remove(identifier)
+            self.completed += 1
+        self._save_completed()
+        if identifier in self.failed_set:
+            self._save_failed()
+
+    def _mark_failed(self, identifier):
+        with self.lock:
+            self.failed_set.add(identifier)
+            self.failed += 1
+        self._save_failed()
 
     def fetch_url(self, url, referer=None, timeout=None, retries=None):
         if timeout is None:
@@ -133,7 +178,7 @@ class DownloadWorker:
                 resp = self.curl_session.get(url, headers=headers, timeout=timeout, impersonate="chrome120")
                 resp.encoding = 'utf-8'
                 if resp.status_code == 200:
-                    if "您的操作太快了" in resp.text or "稍后再试" in resp.text:
+                    if "您的操作太快了" in resp.text or "稍后再试" in resp.text or resp.status_code == 429:
                         wait_time = random.randint(30, 60)
                         self.log(f"检测到访问频率过高，等待{wait_time}秒后重试...")
                         time.sleep(wait_time)
@@ -149,6 +194,7 @@ class DownloadWorker:
     def get_album_title(self):
         resp = self.fetch_url(self.album_url)
         if not resp:
+            self.log("获取专辑标题失败，使用默认标题")
             return "未知专辑"
         soup = BeautifulSoup(resp.text, 'html.parser')
         h1 = soup.find('h1')
@@ -187,7 +233,8 @@ class DownloadWorker:
             chapter_links.append({
                 'url': full_url,
                 'num': chap_num,
-                'title': chap_title
+                'title': chap_title,
+                'identifier': str(chap_num)
             })
         chapter_links.sort(key=lambda x: x['num'])
         return chapter_links
@@ -214,7 +261,8 @@ class DownloadWorker:
             if match:
                 url = match.group(1)
                 url = url.replace('\\/', '/')
-                return url
+                if url.startswith('http'):
+                    return url
         script_tags = soup.find_all('script')
         for script in script_tags:
             if script.string and 'audioUrl' in script.string:
@@ -223,7 +271,9 @@ class DownloadWorker:
                     if 'audioUrl' in line:
                         m = re.search(r'audioUrl\s*[=:]\s*[\'"]([^\'"]+)[\'"]', line)
                         if m:
-                            return m.group(1).replace('\\/', '/')
+                            url = m.group(1).replace('\\/', '/')
+                            if url.startswith('http'):
+                                return url
         self.log(f"无法从页面提取音频URL，响应片段：{text[:300]}")
         return None
 
@@ -249,7 +299,8 @@ class DownloadWorker:
         chap_num = chapter['num']
         chap_title = chapter['title']
         play_url = chapter['url']
-        if play_url in self.completed_set:
+        identifier = chapter['identifier']
+        if identifier in self.completed_set:
             with self.lock:
                 self.completed += 1
             self.stats_log()
@@ -258,40 +309,38 @@ class DownloadWorker:
         self.log(f"[{chap_num}] 开始处理：{chap_title}")
         audio_url = self.get_audio_url(play_url)
         if not audio_url:
-            with self.lock:
-                self.failed += 1
-                self.failed_set.add(play_url)
-            self.save_failed()
+            self._mark_failed(identifier)
             self.stats_log()
             self.log(f"[{chap_num}] 获取音频URL失败，跳过")
             self.fail_log(chap_num, chap_title)
             return
         safe_title = sanitize_filename(chap_title)
-        filename = f"{safe_title}.m4a"
+        filename = f"{chap_num:04d}_{safe_title}.m4a"
         filepath = os.path.join(download_dir, filename)
         temp_path = filepath + ".part"
         success = self.download_audio(audio_url, temp_path)
         if success:
             if os.path.exists(temp_path):
-                os.rename(temp_path, filepath)
-            with self.lock:
-                self.completed_set.add(play_url)
-            self.save_completed()
-            if play_url in self.failed_set:
-                with self.lock:
-                    self.failed_set.remove(play_url)
-                self.save_failed()
-            with self.lock:
-                self.completed += 1
-            self.stats_log()
-            self.log(f"[{chap_num}] 下载完成 -> {filename}")
+                try:
+                    os.rename(temp_path, filepath)
+                except OSError as e:
+                    self.log(f"文件重命名失败: {e}")
+                    success = False
+            if success:
+                self._mark_completed(identifier)
+                self.stats_log()
+                self.log(f"[{chap_num}] 下载完成 -> {filename}")
+            else:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                self._mark_failed(identifier)
+                self.stats_log()
+                self.log(f"[{chap_num}] 下载失败")
+                self.fail_log(chap_num, chap_title)
         else:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
-            with self.lock:
-                self.failed += 1
-                self.failed_set.add(play_url)
-            self.save_failed()
+            self._mark_failed(identifier)
             self.stats_log()
             self.log(f"[{chap_num}] 下载失败")
             self.fail_log(chap_num, chap_title)
@@ -301,8 +350,8 @@ class DownloadWorker:
         with self.lock:
             self.completed = 0
             self.failed = 0
-        self.load_completed()
-        self.load_failed()
+        self._load_completed()
+        self._load_failed()
         self.log("开始获取专辑信息...")
         self.fetch_url("https://m.i275.com/", referer="https://m.i275.com/")
         album_title = self.get_album_title()
@@ -316,7 +365,7 @@ class DownloadWorker:
             return
         self.total_chapters = len(all_chapters)
         if self.failed_set:
-            chapters = [c for c in all_chapters if c['url'] in self.failed_set]
+            chapters = [c for c in all_chapters if c['identifier'] in self.failed_set]
             self.log(f"发现失败记录，本次将重试 {len(chapters)} 个章节")
         else:
             chapters = all_chapters
@@ -330,20 +379,17 @@ class DownloadWorker:
         try:
             for future in as_completed(future_to_chap):
                 if self.stop_flag:
+                    for f in future_to_chap:
+                        f.cancel()
                     break
                 chap = future_to_chap[future]
                 try:
                     future.result()
                 except Exception as e:
                     self.log(f"[{chap['num']}] 处理异常: {e}")
-                    with self.lock:
-                        self.failed_set.add(chap['url'])
-                    self.save_failed()
+                    self._mark_failed(chap['identifier'])
         finally:
-            if self.stop_flag:
-                self.executor.shutdown(wait=False)
-            else:
-                self.executor.shutdown(wait=True)
+            self.executor.shutdown(wait=True)
         if not self.stop_flag:
             self.log(f"本轮下载完成！成功 {self.completed} 失败 {self.failed}")
             if self.failed_set:
@@ -368,12 +414,12 @@ class DownloaderApp(Tk):
         self.selected_book_title = None
         self.selected_book_announcer = None
         self.log_queue = queue.Queue()
-        self.worker_thread = None
         self.worker = None
         self.running = False
         self.auto_loop_active = False
         self.auto_loop_thread = None
         self.state_lock = threading.Lock()
+        self.progress_var = IntVar(value=0)
         self.create_widgets()
         self.update_log()
 
@@ -384,8 +430,10 @@ class DownloaderApp(Tk):
         search_frame = Frame(main_frame)
         search_frame.pack(fill=X, pady=5)
         Label(search_frame, text="关键词：").pack(side=LEFT)
-        Entry(search_frame, textvariable=self.search_var, width=50).pack(side=LEFT, padx=5, expand=True, fill=X)
-        Button(search_frame, text="搜索", command=self.search, bg="blue", fg="white", width=10).pack(side=LEFT, padx=5)
+        self.search_entry = Entry(search_frame, textvariable=self.search_var, width=50)
+        self.search_entry.pack(side=LEFT, padx=5, expand=True, fill=X)
+        self.search_btn = Button(search_frame, text="搜索", command=self.search, bg="blue", fg="white", width=10)
+        self.search_btn.pack(side=LEFT, padx=5)
 
         result_frame = LabelFrame(main_frame, text="搜索结果")
         result_frame.pack(fill=BOTH, expand=True, pady=5)
@@ -436,6 +484,9 @@ class DownloaderApp(Tk):
         self.total_label = Label(stats_frame, text="0", font=("Arial", 10, "bold"))
         self.total_label.pack(side=LEFT)
 
+        self.progress = ttk.Progressbar(main_frame, variable=self.progress_var, maximum=100)
+        self.progress.pack(fill=X, pady=2)
+
         ctrl_frame = Frame(main_frame)
         ctrl_frame.pack(fill=X, pady=5)
         self.start_btn = Button(ctrl_frame, text="开始下载", command=self.start_download, bg="green", fg="white", width=12)
@@ -463,7 +514,11 @@ class DownloaderApp(Tk):
         if not keyword:
             messagebox.showwarning("提示", "请输入搜索关键词")
             return
+        self.search_btn.config(state=DISABLED, text="搜索中...")
         self.log(f"正在搜索：{keyword}")
+        threading.Thread(target=self._search_worker, args=(keyword,), daemon=True).start()
+
+    def _search_worker(self, keyword):
         for item in self.tree.get_children():
             self.tree.delete(item)
         search_url = f"https://m.i275.com/search.php?q={urllib.parse.quote(keyword)}"
@@ -473,36 +528,42 @@ class DownloaderApp(Tk):
             resp.encoding = 'utf-8'
             if resp.status_code != 200:
                 self.log(f"搜索请求失败，状态码 {resp.status_code}")
+                self.after(0, lambda: self.search_btn.config(state=NORMAL, text="搜索"))
                 return
             soup = BeautifulSoup(resp.text, 'html.parser')
             items = soup.find_all('a', href=re.compile(r'^/book/\d+\.html'))
             if not items:
                 self.log("未找到相关结果")
+                self.after(0, lambda: self.search_btn.config(state=NORMAL, text="搜索"))
                 return
-            index = 1
-            for a in items:
-                href = a.get('href')
-                book_url = urllib.parse.urljoin("https://m.i275.com/", href)
-                title_div = a.find('h3') or a.find('div', class_='font-medium')
-                if not title_div:
-                    continue
-                title = title_div.get_text(strip=True)
-                if not title or title == "未知书名":
-                    continue
-                info_spans = a.find_all('p', class_='text-xs')
-                announcer = ""
-                author = ""
-                for p in info_spans:
-                    text = p.get_text(strip=True)
-                    if "演播" in text:
-                        announcer = text.replace("演播", "").strip()
-                    elif "作者" in text:
-                        author = text.replace("作者", "").strip()
-                self.tree.insert('', 'end', text=str(index), values=(title, announcer, author), tags=(book_url, title))
-                index += 1
-            self.log(f"搜索完成，共找到 {index-1} 条结果")
+            def update_tree():
+                index = 1
+                for a in items:
+                    href = a.get('href')
+                    book_url = urllib.parse.urljoin("https://m.i275.com/", href)
+                    title_div = a.find('h3') or a.find('div', class_='font-medium')
+                    if not title_div:
+                        continue
+                    title = title_div.get_text(strip=True)
+                    if not title or title == "未知书名":
+                        continue
+                    info_spans = a.find_all('p', class_='text-xs')
+                    announcer = ""
+                    author = ""
+                    for p in info_spans:
+                        text = p.get_text(strip=True)
+                        if "演播" in text:
+                            announcer = text.replace("演播", "").strip()
+                        elif "作者" in text:
+                            author = text.replace("作者", "").strip()
+                    self.tree.insert('', 'end', text=str(index), values=(title, announcer, author), tags=(book_url, title))
+                    index += 1
+                self.log(f"搜索完成，共找到 {index-1} 条结果")
+                self.search_btn.config(state=NORMAL, text="搜索")
+            self.after(0, update_tree)
         except Exception as e:
             self.log(f"搜索异常: {e}")
+            self.after(0, lambda: self.search_btn.config(state=NORMAL, text="搜索"))
 
     def on_select(self, event):
         selected = self.tree.selection()
@@ -536,6 +597,7 @@ class DownloaderApp(Tk):
         self.start_btn.config(state=DISABLED)
         self.stop_btn.config(state=NORMAL)
         self.fail_text.delete(1.0, END)
+        self.progress_var.set(0)
         self.auto_loop_thread = threading.Thread(target=self.auto_loop)
         self.auto_loop_thread.daemon = True
         self.auto_loop_thread.start()
@@ -570,8 +632,8 @@ class DownloaderApp(Tk):
         with self.state_lock:
             self.auto_loop_active = False
             self.running = False
-        self.start_btn.config(state=NORMAL)
-        self.stop_btn.config(state=DISABLED)
+        self.after(0, lambda: self.start_btn.config(state=NORMAL))
+        self.after(0, lambda: self.stop_btn.config(state=DISABLED))
 
     def stop_download(self):
         with self.state_lock:
@@ -579,8 +641,8 @@ class DownloaderApp(Tk):
                 self.worker.stop_flag = True
             self.auto_loop_active = False
             self.running = False
-        self.start_btn.config(state=NORMAL)
-        self.stop_btn.config(state=DISABLED)
+        self.after(0, lambda: self.start_btn.config(state=NORMAL))
+        self.after(0, lambda: self.stop_btn.config(state=DISABLED))
         self.log("用户请求停止...")
 
     def update_log(self):
@@ -603,6 +665,9 @@ class DownloaderApp(Tk):
                         self.completed_label.config(text=str(completed))
                         self.failed_label.config(text=str(failed))
                         self.total_label.config(text=str(total))
+                        if total > 0:
+                            progress = int((completed + failed) / total * 100)
+                            self.progress_var.set(progress)
                 else:
                     self.log_text.insert(END, msg + "\n")
                     self.log_text.see(END)

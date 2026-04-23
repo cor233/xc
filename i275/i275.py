@@ -20,10 +20,14 @@ def safe_filename(s: str) -> str:
     return s.strip().rstrip('.')
 
 class AudioDownloader:
-    def __init__(self, log_callback=None, stats_callback=None, progress_callback=None):
+    def __init__(self, log_callback=None, stats_callback=None):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://m.i275.com/'
+        })
         self.log_callback = log_callback
         self.stats_callback = stats_callback
-        self.progress_callback = progress_callback
         self.cancel_flag = False
         self.paused_flag = False
         self.failed_list = []
@@ -31,7 +35,6 @@ class AudioDownloader:
         self.completed = 0
         self.failed = 0
         self.total = 0
-        self.active_threads = 0
 
     def log(self, msg):
         if self.log_callback:
@@ -43,11 +46,7 @@ class AudioDownloader:
 
     def search_books(self, keyword: str):
         url = f"https://m.i275.com/search.php?q={requests.utils.quote(keyword)}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0',
-            'Referer': 'https://m.i275.com/'
-        }
-        resp = requests.get(url, timeout=15, headers=headers)
+        resp = self.session.get(url, timeout=15)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
         results = []
@@ -66,15 +65,10 @@ class AudioDownloader:
         return results
 
     def fetch_chapters(self, detail_url: str):
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0',
-            'Referer': 'https://m.i275.com/'
-        }
-        resp = requests.get(detail_url, timeout=15, headers=headers)
+        resp = self.session.get(detail_url, timeout=15)
         resp.encoding = 'utf-8'
         soup = BeautifulSoup(resp.text, 'html.parser')
-        title_h1 = soup.select_one('.bg-white h1') or soup.select_one('h1')
-        book_title = safe_filename(title_h1.text.strip()) if title_h1 else '未知书名'
+        book_title = safe_filename(soup.select_one('h1').text.strip() if soup.select_one('h1') else '未知书名')
         narrator = ''
         narrator_p = soup.find('p', string=re.compile(r'演播[：:]'))
         if narrator_p:
@@ -105,67 +99,28 @@ class AudioDownloader:
         return book_title, narrator, chapters
 
     def extract_audio_url(self, play_url: str):
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0',
-            'Referer': 'https://m.i275.com/'
-        }
-        for attempt in range(3):
-            try:
-                resp = requests.get(play_url, timeout=15, headers=headers)
-                resp.encoding = 'utf-8'
-                html = resp.text
-                match = re.search(r"url:\s*['\"]([^'\"]+\.m4a[^'\"]*)['\"]", html)
-                if match:
-                    return match.group(1).replace('\\', '')
-                match = re.search(r"url:\s*['\"]([^'\"]+)['\"]", html)
-                if match:
-                    return match.group(1).replace('\\', '')
-                if attempt < 2:
-                    time.sleep(2)
-                    continue
-                raise Exception("未找到音频链接")
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(2)
-                    continue
-                raise e
+        resp = self.session.get(play_url, timeout=15)
+        resp.encoding = 'utf-8'
+        html = resp.text
+        match = re.search(r"url:\s*['\"]([^'\"]+\.m4a[^'\"]*)['\"]", html)
+        if match:
+            return match.group(1).replace('\\', '')
+        match = re.search(r"url:\s*['\"]([^'\"]+)['\"]", html)
+        if match:
+            return match.group(1).replace('\\', '')
+        raise Exception("未找到音频链接")
 
     def download_audio(self, audio_url: str, save_path: str):
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0',
-            'Referer': 'https://m.i275.com/'
-        }
-        for attempt in range(3):
-            try:
-                resp = requests.get(audio_url, stream=True, timeout=30, headers=headers)
-                if resp.status_code != 200:
-                    raise Exception(f"HTTP {resp.status_code}")
-                content_type = resp.headers.get('Content-Type', '')
-                if 'audio' not in content_type and 'octet-stream' not in content_type and 'mpeg' not in content_type:
-                    if attempt < 2:
-                        time.sleep(2)
-                        continue
-                    raise Exception(f"非音频响应: {content_type}")
-                total_size = int(resp.headers.get('content-length', 0))
-                downloaded = 0
-                with open(save_path, 'wb') as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
-                        if self.cancel_flag:
-                            raise Exception("下载被取消")
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                if total_size > 0 and downloaded < total_size * 0.9:
-                    raise Exception(f"文件不完整: {downloaded}/{total_size}")
-                if os.path.getsize(save_path) < 10240:
-                    os.remove(save_path)
-                    raise Exception("文件过小，可能为错误页面")
-                return True
-            except Exception as e:
-                if attempt < 2 and not self.cancel_flag:
-                    time.sleep(2)
-                    continue
-                raise e
+        resp = self.session.get(audio_url, stream=True, timeout=30)
+        with open(save_path, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if self.cancel_flag:
+                    raise Exception("下载被取消")
+                if chunk:
+                    f.write(chunk)
+        if os.path.getsize(save_path) < 10240:
+            os.remove(save_path)
+            raise Exception("文件过小")
 
     def worker(self, queue, folder_name, output_dir, play_url_cache):
         while not self.cancel_flag:
@@ -198,8 +153,6 @@ class AudioDownloader:
                 self.log(f"✗ {chap_title}: {str(e)}")
             finally:
                 queue.task_done()
-                if self.progress_callback:
-                    self.progress_callback()
 
     def download_selected(self, folder_name: str, selected_chapters: list, output_dir: str):
         book_dir = os.path.join(output_dir, folder_name)
@@ -209,25 +162,25 @@ class AudioDownloader:
         self.failed = 0
         self.failed_list = []
         self.update_stats()
-        
+
         queue = Queue()
         play_url_cache = {}
         for item in selected_chapters:
             queue.put(item)
-        
+
         threads = []
         for _ in range(min(3, self.total)):
             t = threading.Thread(target=self.worker, args=(queue, folder_name, output_dir, play_url_cache))
             t.daemon = True
             t.start()
             threads.append(t)
-        
+
         while not self.cancel_flag and not queue.empty():
             if self.paused_flag:
                 time.sleep(0.5)
                 continue
             time.sleep(0.5)
-        
+
         for t in threads:
             t.join(timeout=1)
         return self.completed, self.failed, self.failed_list
@@ -509,14 +462,14 @@ class DownloaderApp:
             self.downloader.pause()
             self.pause_btn.config(state=tk.DISABLED)
             self.resume_btn.config(state=tk.NORMAL)
-            self.log("已暂停，正在进行的章节将继续完成...")
+            self.log("已暂停")
 
     def resume_download(self):
         if self.downloader:
             self.downloader.resume()
             self.pause_btn.config(state=tk.NORMAL)
             self.resume_btn.config(state=tk.DISABLED)
-            self.log("继续下载...")
+            self.log("继续下载")
 
     def retry_failed(self):
         if not self.failed_items:

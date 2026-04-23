@@ -15,11 +15,7 @@ from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0"
 ]
 IMPERSONATES = ["chrome120", "chrome119", "safari17_0"]
 MAX_FILENAME_LEN = 200
@@ -31,10 +27,14 @@ def sanitize_filename(name):
         '\\': '＼', '/': '／', ':': '：', '*': '＊',
         '?': '？', '"': '＂', '<': '＜', '>': '＞', '|': '｜'
     }
-    cleaned = re.sub(r'[\\/:*?"<>|]', lambda m: char_map[m.group(0)], name).strip()
+    cleaned = ''.join(char_map.get(c, c) for c in name).strip()
     if len(cleaned) > MAX_FILENAME_LEN:
         name_part, ext_part = os.path.splitext(cleaned)
-        cleaned = name_part[:MAX_FILENAME_LEN - len(ext_part)] + ext_part
+        keep_len = MAX_FILENAME_LEN - len(ext_part)
+        if keep_len > 0:
+            cleaned = name_part[:keep_len] + ext_part
+        else:
+            cleaned = name_part[:MAX_FILENAME_LEN]
     return cleaned
 
 class RateLimiter:
@@ -192,13 +192,12 @@ class DownloadWorker:
                     self.log(f"请求失败，状态码 {resp.status_code}，重试 {attempt+1}/{retries}")
             except Exception as e:
                 self.log(f"请求异常: {e}，重试 {attempt+1}/{retries}")
-            time.sleep(random.uniform(*self.request_delay) * 2)
+            time.sleep(random.uniform(*self.request_delay) * (2 ** attempt))
         return None
 
     def get_album_title(self):
         resp = self.fetch_url(self.album_url)
         if not resp:
-            self.log("获取专辑标题失败，使用默认标题")
             return "未知专辑"
         soup = BeautifulSoup(resp.text, 'html.parser')
         h1 = soup.find('h1')
@@ -248,26 +247,19 @@ class DownloadWorker:
         if not resp:
             return None
         text = resp.text
-        pattern_ap = r"url:\s*['\"](http[^'\"]+)['\"]"
-        match = re.search(pattern_ap, text)
+        pattern = r"url:\s*['\"]([^'\"]+\.(?:mp3|m4a|aac|ogg|wav|flac)[^'\"]*)['\"]"
+        match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            url = match.group(1).replace('\\/', '/')
-            return url
-        patterns = [
-            r"url:\s*'([^']+)'",
-            r'"url"\s*:\s*"([^"]+)"',
-            r'audioUrl\s*=\s*[\'"]([^\'"]+)[\'"]',
-            r'var\s+audioUrl\s*=\s*[\'"]([^\'"]+)[\'"]',
-            r'<audio[^>]+src="([^"]+)"',
-            r'<source[^>]+src="([^"]+)"',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                url = match.group(1).replace('\\/', '/')
-                if url.startswith('http'):
-                    return url
-        self.log(f"无法提取音频URL，响应片段：{text[:300]}")
+            return match.group(1).replace('\\/', '/')
+        audio_pattern = r'<audio[^>]+src="([^"]+\.(?:mp3|m4a|aac|ogg|wav|flac)[^"]*)"'
+        match = re.search(audio_pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).replace('\\/', '/')
+        source_pattern = r'<source[^>]+src="([^"]+\.(?:mp3|m4a|aac|ogg|wav|flac)[^"]*)"'
+        match = re.search(source_pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).replace('\\/', '/')
+        self.log("无法提取音频URL，请检查页面结构是否变化")
         return None
 
     def download_audio(self, audio_url, save_path, max_retries=2):
@@ -287,7 +279,7 @@ class DownloadWorker:
                         self.log(f"下载失败，状态码 {r.status_code}，重试 {attempt+1}/{max_retries}")
             except Exception as e:
                 self.log(f"下载异常: {e}，重试 {attempt+1}/{max_retries}")
-            time.sleep(random.uniform(2, 5))
+            time.sleep(random.uniform(2, 5) * (2 ** attempt))
         return False
 
     def process_chapter(self, chapter, download_dir):
@@ -310,7 +302,11 @@ class DownloadWorker:
             self.fail_log(chap_num, chap_title)
             return
         safe_title = sanitize_filename(chap_title)
-        filename = f"{chap_num:04d}_{safe_title}.m4a"
+        ext = 'm4a'
+        ext_match = re.search(r'\.(mp3|m4a|aac|ogg|wav|flac)(\?|$)', audio_url, re.IGNORECASE)
+        if ext_match:
+            ext = ext_match.group(1).lower()
+        filename = f"{chap_num:04d}_{safe_title}.{ext}"
         filepath = os.path.join(download_dir, filename)
         temp_path = filepath + ".part"
         success = self.download_audio(audio_url, temp_path)
@@ -414,7 +410,6 @@ class DownloaderApp(Tk):
         self.auto_loop_active = False
         self.auto_loop_thread = None
         self.state_lock = threading.Lock()
-        self.progress_var = IntVar(value=0)
         self.create_widgets()
         self.update_log()
 
@@ -478,9 +473,6 @@ class DownloaderApp(Tk):
         Label(stats_frame, text="总章:").pack(side=LEFT)
         self.total_label = Label(stats_frame, text="0", font=("Arial", 10, "bold"))
         self.total_label.pack(side=LEFT)
-
-        self.progress = ttk.Progressbar(main_frame, variable=self.progress_var, maximum=100)
-        self.progress.pack(fill=X, pady=2)
 
         ctrl_frame = Frame(main_frame)
         ctrl_frame.pack(fill=X, pady=5)
@@ -592,7 +584,6 @@ class DownloaderApp(Tk):
         self.start_btn.config(state=DISABLED)
         self.stop_btn.config(state=NORMAL)
         self.fail_text.delete(1.0, END)
-        self.progress_var.set(0)
         self.auto_loop_thread = threading.Thread(target=self.auto_loop)
         self.auto_loop_thread.daemon = True
         self.auto_loop_thread.start()
@@ -660,9 +651,6 @@ class DownloaderApp(Tk):
                         self.completed_label.config(text=str(completed))
                         self.failed_label.config(text=str(failed))
                         self.total_label.config(text=str(total))
-                        if total > 0:
-                            progress = int((completed + failed) / total * 100)
-                            self.progress_var.set(progress)
                 else:
                     self.log_text.insert(END, msg + "\n")
                     self.log_text.see(END)

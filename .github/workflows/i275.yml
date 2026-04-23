@@ -1,47 +1,35 @@
-name: Build i275 EXE
+name: Build i275.exe
 
 on:
+  push:
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  build-windows:
+  build:
     runs-on: windows-latest
 
     steps:
-      - name: 检出代码
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: 设置 Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
-      - name: 安装依赖
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: 调试：检查 curl_cffi 位置
+      - name: Build executable
         run: |
-          python -c "import curl_cffi; print(curl_cffi.__file__)"
+          pyinstaller --onefile --windowed --name i275 i275.py
 
-      - name: 使用 PyInstaller 打包
-        run: |
-          pyinstaller `
-            --onefile `
-            --windowed `
-            --name "i275" `
-            --hidden-import tkinter `
-            --hidden-import curl_cffi `
-            --collect-all curl_cffi `
-            i275.py
-
-      - name: 列出 dist 目录内容（调试用）
-        run: dir dist
-
-      - name: 上传构建产物 (exe)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: i275-downloader-windows
+          name: i275-exe
           path: dist/i275.exe

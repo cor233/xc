@@ -1,429 +1,267 @@
-import warnings
-warnings.filterwarnings('ignore', message='Unverified HTTPS request')
-
 import os
 import re
-import json
-import time
 import threading
-from urllib.parse import quote
+import queue
 import requests
+from pathlib import Path
+from urllib.parse import urljoin
+import customtkinter as ctk
+from tkinter import messagebox, filedialog
 from bs4 import BeautifulSoup
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
 
-BASE_URL = "https://m.i275.com"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0",
-    "Referer": BASE_URL
-}
+# 设置外观
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
 
-ILLEGAL_CHAR_MAP = {
-    '<': '《', '>': '》', ':': '：', '"': '“', '/': '／',
-    '\\': '＼', '|': '｜', '?': '？', '*': '＊'
-}
+class AudioBookDownloader(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("有声书下载器 - 275听书网")
+        self.geometry("900x650")
+        self.minsize(800, 600)
 
-def sanitize_filename(name):
-    for illegal, replacement in ILLEGAL_CHAR_MAP.items():
-        name = name.replace(illegal, replacement)
-    name = name.strip('. ')
-    return name
-
-def fetch_url(url):
-    resp = requests.get(url, headers=HEADERS, timeout=15, verify=False)
-    resp.raise_for_status()
-    resp.encoding = resp.apparent_encoding
-    return resp.text
-
-def search_books(keyword):
-    url = f"{BASE_URL}/search.php?q={quote(keyword)}"
-    html = fetch_url(url)
-    soup = BeautifulSoup(html, 'html.parser')
-    books = []
-    for a_tag in soup.select('a[href^="/book/"]'):
-        title_elem = a_tag.select_one('h3')
-        if not title_elem:
-            continue
-        title = title_elem.get_text(strip=True)
-        anchor = "未知演播"
-        for p in a_tag.find_all('p'):
-            text = p.get_text(strip=True)
-            if '演播' in text:
-                anchor = text.replace('演播', '', 1).strip()
-                break
-        book_url = a_tag['href']
-        books.append((title, anchor, book_url))
-    seen = set()
-    unique_books = []
-    for book in books:
-        if book[2] not in seen:
-            seen.add(book[2])
-            unique_books.append(book)
-    return unique_books
-
-def get_book_info(book_url):
-    url = BASE_URL + book_url
-    html = fetch_url(url)
-    soup = BeautifulSoup(html, 'html.parser')
-    title = "未知书名"
-    h1 = soup.select_one('h1.text-2xl.font-bold')
-    if h1:
-        title = h1.get_text(strip=True)
-    if title == "未知书名":
-        info_div = soup.find('div', class_='space-y-1')
-        if info_div:
-            prev_h1 = info_div.find_previous('h1')
-            if prev_h1:
-                title = prev_h1.get_text(strip=True)
-    if title == "未知书名":
-        for h in soup.select('h1'):
-            txt = h.get_text()
-            if '275听书' not in txt and '海量' not in txt and '免费' not in txt:
-                title = txt.strip()
-                break
-    anchor = "未知"
-    info_div = soup.find('div', class_='space-y-1')
-    if info_div:
-        for p in info_div.find_all('p'):
-            text = p.get_text()
-            if '演播' in text:
-                anchor = text.split('：')[-1].strip()
-                break
-    chapters = []
-    for a in soup.select('a[id^="chapter-pos-"]'):
-        href = a.get('href', '')
-        chapter_title = a.select_one('span.text-sm')
-        if not chapter_title:
-            continue
-        chapter_name = chapter_title.get_text(strip=True)
-        chapters.append((chapter_name, href))
-    return title, anchor, chapters
-
-def get_audio_url(play_url):
-    url = BASE_URL + play_url
-    html = fetch_url(url)
-    match = re.search(r"url:\s*'([^']+)'", html, re.DOTALL)
-    if match:
-        return match.group(1).replace('\\/', '/')
-    match = re.search(r'url:\s*"([^"]+)"', html, re.DOTALL)
-    if match:
-        return match.group(1).replace('\\/', '/')
-    matches = re.findall(r'(https?://[^"\'\s]+\.m4a[^"\'\s]*)', html)
-    if matches:
-        return matches[0]
-    raise RuntimeError("未找到音频地址")
-
-class DownloadAborted(Exception):
-    pass
-
-class AudioDownloaderApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("i275有声书下载工具")
-        self.root.geometry("900x650")
-        self.root.minsize(800, 600)
-
-        self.style = ttk.Style()
-        self.style.theme_use('clam')
-        self.style.configure('TButton', font=('微软雅黑', 10), padding=6)
-        self.style.configure('TLabel', font=('微软雅黑', 10))
-        self.style.configure('TEntry', font=('微软雅黑', 10))
-
-        self.book_title = None
-        self.anchor = None
         self.chapters = []
-        self.save_path = os.getcwd()
+        self.download_queue = queue.Queue()
         self.downloading = False
-        self.failed_chapters = []
-        self.total_chapters = 0
-        self.success_count = 0
-        self.fail_count = 0
+        self.cancelled = False
 
-        self.create_widgets()
+        # 主布局
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=0)  # 输入行
+        self.grid_rowconfigure(1, weight=1)  # 列表+日志
+        self.grid_rowconfigure(2, weight=0)  # 进度
 
-    def create_widgets(self):
-        top_frame = ttk.Frame(self.root, padding=10)
-        top_frame.pack(fill=tk.X)
+        # 顶部输入区域
+        self.top_frame = ctk.CTkFrame(self)
+        self.top_frame.grid(row=0, column=0, padx=10, pady=(10, 5), sticky="ew")
+        self.top_frame.grid_columnconfigure(1, weight=1)
 
-        ttk.Label(top_frame, text="搜索书名/播讲人：").pack(side=tk.LEFT, padx=(0,5))
-        self.search_entry = ttk.Entry(top_frame, width=40)
-        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0,5))
-        self.search_entry.bind('<Return>', lambda e: self.start_search())
+        ctk.CTkLabel(self.top_frame, text="书籍URL:").grid(row=0, column=0, padx=5, pady=5)
+        self.url_entry = ctk.CTkEntry(self.top_frame, placeholder_text="https://m.i275.com/book/33175.html")
+        self.url_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        self.parse_btn = ctk.CTkButton(self.top_frame, text="解析目录", command=self.parse_book)
+        self.parse_btn.grid(row=0, column=2, padx=5, pady=5)
 
-        search_btn = ttk.Button(top_frame, text="搜索", command=self.start_search)
-        search_btn.pack(side=tk.LEFT)
+        # 中间内容区域（左右分栏）
+        self.content_frame = ctk.CTkFrame(self)
+        self.content_frame.grid(row=1, column=0, padx=10, pady=5, sticky="nsew")
+        self.content_frame.grid_columnconfigure(0, weight=1)
+        self.content_frame.grid_columnconfigure(1, weight=1)
+        self.content_frame.grid_rowconfigure(0, weight=1)
 
-        main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0,10))
+        # 左侧：章节列表
+        self.list_frame = ctk.CTkFrame(self.content_frame)
+        self.list_frame.grid(row=0, column=0, padx=(0, 5), pady=0, sticky="nsew")
+        self.list_frame.grid_rowconfigure(0, weight=1)
+        self.list_frame.grid_columnconfigure(0, weight=1)
 
-        left_frame = ttk.LabelFrame(main_paned, text="搜索结果", padding=5)
-        main_paned.add(left_frame, weight=1)
+        self.chapter_listbox = ctk.CTkTextbox(self.list_frame, wrap="none")
+        self.chapter_listbox.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
-        self.result_tree = ttk.Treeview(left_frame, columns=('title', 'anchor'), show='headings', height=15)
-        self.result_tree.heading('title', text='书名')
-        self.result_tree.heading('anchor', text='演播')
-        self.result_tree.column('title', width=200, anchor='w')
-        self.result_tree.column('anchor', width=120, anchor='w')
-        self.result_tree.pack(fill=tk.BOTH, expand=True)
-        self.result_tree.bind('<Double-1>', self.on_select_book)
-        self.result_tree.bind('<Return>', self.on_select_book)
+        # 右侧：日志
+        self.log_frame = ctk.CTkFrame(self.content_frame)
+        self.log_frame.grid(row=0, column=1, padx=(5, 0), pady=0, sticky="nsew")
+        self.log_frame.grid_rowconfigure(0, weight=1)
+        self.log_frame.grid_columnconfigure(0, weight=1)
 
-        right_frame = ttk.Frame(main_paned, padding=5)
-        main_paned.add(right_frame, weight=2)
+        self.log_text = ctk.CTkTextbox(self.log_frame, wrap="word")
+        self.log_text.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
-        info_frame = ttk.LabelFrame(right_frame, text="书籍信息", padding=10)
-        info_frame.pack(fill=tk.X, pady=(0,10))
+        # 底部进度和控制
+        self.bottom_frame = ctk.CTkFrame(self)
+        self.bottom_frame.grid(row=2, column=0, padx=10, pady=(5, 10), sticky="ew")
+        self.bottom_frame.grid_columnconfigure(0, weight=1)
 
-        self.info_label = ttk.Label(info_frame, text="尚未选择书籍", font=('微软雅黑', 12, 'bold'))
-        self.info_label.pack(anchor='w')
+        self.progress = ctk.CTkProgressBar(self.bottom_frame)
+        self.progress.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+        self.progress.set(0)
 
-        self.chapter_count_label = ttk.Label(info_frame, text="")
-        self.chapter_count_label.pack(anchor='w', pady=(5,0))
+        self.status_label = ctk.CTkLabel(self.bottom_frame, text="就绪")
+        self.status_label.grid(row=1, column=0, padx=5, pady=2, sticky="w")
 
-        path_frame = ttk.Frame(info_frame)
-        path_frame.pack(fill=tk.X, pady=(10,0))
+        self.download_btn = ctk.CTkButton(self.bottom_frame, text="开始下载", command=self.start_download)
+        self.download_btn.grid(row=0, column=1, padx=5, pady=5)
 
-        ttk.Label(path_frame, text="保存到：").pack(side=tk.LEFT)
-        self.path_var = tk.StringVar(value=self.save_path)
-        path_entry = ttk.Entry(path_frame, textvariable=self.path_var, state='readonly', width=50)
-        path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        ttk.Button(path_frame, text="选择目录", command=self.choose_directory).pack(side=tk.RIGHT)
+        self.stop_btn = ctk.CTkButton(self.bottom_frame, text="停止", command=self.stop_download, fg_color="gray")
+        self.stop_btn.grid(row=0, column=2, padx=5, pady=5)
 
-        btn_frame = ttk.Frame(right_frame)
-        btn_frame.pack(fill=tk.X, pady=(5,0))
+        self.save_btn = ctk.CTkButton(self.bottom_frame, text="选择目录", command=self.select_folder)
+        self.save_btn.grid(row=0, column=3, padx=5, pady=5)
 
-        self.download_btn = ttk.Button(btn_frame, text="开始下载", width=15, command=self.start_download)
-        self.download_btn.pack(side=tk.RIGHT, padx=(5,0))
-        self.download_btn.configure(state=tk.DISABLED)
+        self.save_folder = os.path.join(os.path.expanduser("~"), "Downloads", "AudioBooks")
+        os.makedirs(self.save_folder, exist_ok=True)
 
-        self.retry_btn = ttk.Button(btn_frame, text="重试失败", width=10, command=self.retry_failed, state=tk.DISABLED)
-        self.retry_btn.pack(side=tk.RIGHT, padx=(5,0))
+    # ---------- 日志 ----------
+    def log(self, msg):
+        self.log_text.insert("end", msg + "\n")
+        self.log_text.see("end")
 
-        self.stop_btn = ttk.Button(btn_frame, text="停止", width=10, command=self.stop_download, state=tk.DISABLED)
-        self.stop_btn.pack(side=tk.RIGHT)
+    # ---------- 选择保存目录 ----------
+    def select_folder(self):
+        folder = filedialog.askdirectory(initialdir=self.save_folder)
+        if folder:
+            self.save_folder = folder
+            self.log(f"保存目录设置为: {folder}")
 
-        log_frame = ttk.LabelFrame(right_frame, text="下载统计", padding=5)
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=(10,0))
-
-        self.stats_label = ttk.Label(log_frame, text="就绪", font=('微软雅黑', 11, 'bold'))
-        self.stats_label.pack(anchor='w', pady=(0,5))
-
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=8, font=('Consolas', 9))
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-
-    def log(self, message):
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.root.update_idletasks()
-
-    def update_stats(self):
-        self.stats_label.config(text=f"总计 {self.total_chapters}  已完成 {self.success_count}  失败 {self.fail_count}")
-
-    def start_search(self):
-        keyword = self.search_entry.get().strip()
-        if not keyword:
+    # ---------- 解析书籍目录 ----------
+    def parse_book(self):
+        url = self.url_entry.get().strip()
+        if not url:
+            messagebox.showerror("错误", "请输入书籍URL")
             return
-        self.log(f"正在搜索：{keyword} ...")
+        self.parse_btn.configure(state="disabled", text="解析中...")
+        self.chapters.clear()
+        self.chapter_listbox.delete("1.0", "end")
+        threading.Thread(target=self._parse_thread, args=(url,), daemon=True).start()
+
+    def _parse_thread(self, url):
         try:
-            books = search_books(keyword)
+            headers = {"User-Agent": "Mozilla/5.0"}
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.encoding = "utf-8"
+            if resp.status_code != 200:
+                self.log(f"请求失败: {resp.status_code}")
+                self.parse_btn.configure(state="normal", text="解析目录")
+                return
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            # 查找所有章节链接
+            pattern = re.compile(r"/play/\d+/\d+\.html")
+            links = soup.find_all("a", href=pattern)
+
+            for a in links:
+                href = a["href"]
+                title = a.get_text(strip=True)
+                if not title:
+                    span = a.find("span", class_=lambda c: c and "truncate" in c)
+                    if span:
+                        title = span.get_text(strip=True)
+                if not title:
+                    title = href.rsplit("/", 1)[-1].replace(".html", "")
+                full_url = urljoin(url, href)
+                self.chapters.append((title, full_url))
+
+            # 去重 & 排序（按URL中的数字）
+            seen = set()
+            unique_chapters = []
+            for title, link in self.chapters:
+                if link not in seen:
+                    seen.add(link)
+                    unique_chapters.append((title, link))
+            self.chapters = unique_chapters
+            # 按章节ID排序
+            self.chapters.sort(key=lambda x: int(re.search(r"/play/\d+/(\d+)\.html", x[1]).group(1)))
+
+            # 更新UI
+            self.after(0, self._update_chapter_list)
         except Exception as e:
-            messagebox.showerror("搜索失败", str(e))
-            self.log(f"搜索失败：{e}")
-            return
-        if not books:
-            self.log("未找到任何结果。")
-            self.result_tree.delete(*self.result_tree.get_children())
-            return
-        self.result_tree.delete(*self.result_tree.get_children())
-        for idx, (title, anchor, url) in enumerate(books):
-            self.result_tree.insert('', 'end', iid=str(idx), values=(title, anchor), tags=(url,))
-        self.log(f"搜索完成，共 {len(books)} 个结果。")
+            self.log(f"解析出错: {e}")
+        finally:
+            self.after(0, lambda: self.parse_btn.configure(state="normal", text="解析目录"))
 
-    def on_select_book(self, event=None):
-        sel = self.result_tree.selection()
-        if not sel:
-            return
-        item = sel[0]
-        values = self.result_tree.item(item, 'values')
-        tags = self.result_tree.item(item, 'tags')
-        if not tags:
-            return
-        book_url = tags[0]
-        title, anchor = values
-        self.log(f"正在获取书籍详情：{title} - {anchor}")
-        try:
-            book_title, anchor_main, chapters = get_book_info(book_url)
-        except Exception as e:
-            messagebox.showerror("获取失败", str(e))
-            self.log(f"获取详情失败：{e}")
-            return
-        self.book_title = book_title
-        self.anchor = anchor_main
-        self.chapters = chapters
-        self.info_label.config(text=f"{book_title}　　{anchor_main} 演播")
-        self.chapter_count_label.config(text=f"共 {len(chapters)} 章")
-        self.download_btn.configure(state=tk.NORMAL)
-        self.retry_btn.configure(state=tk.DISABLED)
-        self.log(f"已选择：《{book_title}》共 {len(chapters)} 章。")
+    def _update_chapter_list(self):
+        self.chapter_listbox.delete("1.0", "end")
+        for i, (title, _) in enumerate(self.chapters, 1):
+            self.chapter_listbox.insert("end", f"{i}. {title}\n")
+        self.log(f"解析到 {len(self.chapters)} 个章节")
 
-    def choose_directory(self):
-        path = filedialog.askdirectory(initialdir=self.path_var.get())
-        if path:
-            self.path_var.set(path)
-            self.save_path = path
-
+    # ---------- 下载逻辑 ----------
     def start_download(self):
-        if self.downloading:
-            return
         if not self.chapters:
-            messagebox.showwarning("提示", "请先选择一本有声书")
+            messagebox.showwarning("警告", "请先解析目录")
             return
-        base_dir = self.save_path
-        folder_name = sanitize_filename(f"{self.book_title}-{self.anchor}")
-        save_folder = os.path.join(base_dir, folder_name)
-        try:
-            os.makedirs(save_folder, exist_ok=True)
-        except OSError as e:
-            messagebox.showerror("创建文件夹失败", str(e))
-            return
-        self.downloading = True
-        self.failed_chapters = []
-        self.total_chapters = len(self.chapters)
-        self.success_count = 0
-        self.fail_count = 0
-        self.update_stats()
-        self.download_btn.configure(state=tk.DISABLED)
-        self.retry_btn.configure(state=tk.DISABLED)
-        self.stop_btn.configure(state=tk.NORMAL)
-        threading.Thread(target=self.download_all, args=(save_folder, self.chapters), daemon=True).start()
-
-    def retry_failed(self):
         if self.downloading:
             return
-        base_dir = self.save_path
-        folder_name = sanitize_filename(f"{self.book_title}-{self.anchor}")
-        save_folder = os.path.join(base_dir, folder_name)
-        json_path = os.path.join(save_folder, "failed_chapters.json")
-        if not os.path.exists(json_path):
-            messagebox.showinfo("提示", "没有失败记录")
-            return
-        try:
-            with open(json_path, 'r', encoding='utf-8') as f:
-                failed = json.load(f)
-        except Exception as e:
-            messagebox.showerror("读取失败", str(e))
-            return
-        if not failed:
-            messagebox.showinfo("提示", "没有失败章节")
-            return
-        retry_list = [(item['chapter'], item['url']) for item in failed]
-        self.total_chapters = len(retry_list)
-        self.success_count = 0
-        self.fail_count = 0
-        self.update_stats()
         self.downloading = True
-        self.failed_chapters = []
-        self.download_btn.configure(state=tk.DISABLED)
-        self.retry_btn.configure(state=tk.DISABLED)
-        self.stop_btn.configure(state=tk.NORMAL)
-        self.log("开始重试失败章节...")
-        threading.Thread(target=self.download_all, args=(save_folder, retry_list), daemon=True).start()
+        self.cancelled = False
+        self.download_btn.configure(state="disabled", text="下载中...")
+        self.progress.set(0)
+        self.status_label.configure(text="准备下载...")
+
+        threading.Thread(target=self._download_worker, daemon=True).start()
+
+    def _download_worker(self):
+        total = len(self.chapters)
+        for idx, (title, page_url) in enumerate(self.chapters, 1):
+            if self.cancelled:
+                self.log("下载已取消")
+                break
+            try:
+                self.after(0, lambda i=idx, t=title: self.status_label.configure(text=f"下载中 ({i}/{total}): {t}"))
+                audio_url = self._get_audio_url(page_url)
+                if not audio_url:
+                    self.log(f"[{idx}/{total}] 未找到音频链接: {title}")
+                    continue
+                self._download_file(audio_url, title, idx)
+                self.after(0, lambda i=idx: self.progress.set(i / total))
+            except Exception as e:
+                self.log(f"[{idx}/{total}] 下载异常: {e}")
+
+        if not self.cancelled:
+            self.after(0, lambda: self.status_label.configure(text="下载完成"))
+            self.log("全部下载完成")
+        else:
+            self.after(0, lambda: self.status_label.configure(text="已停止"))
+        self.downloading = False
+        self.after(0, lambda: self.download_btn.configure(state="normal", text="开始下载"))
+
+    def _get_audio_url(self, page_url):
+        """从播放页提取音频直链"""
+        headers = {"User-Agent": "Mozilla/5.0"}
+        try:
+            resp = requests.get(page_url, headers=headers, timeout=10)
+            resp.encoding = "utf-8"
+            if resp.status_code != 200:
+                return None
+            # 查找 APlayer 初始化中的 url
+            match = re.search(r"url:\s*'([^']+)'", resp.text)
+            if match:
+                return match.group(1)
+            # 备选: 匹配所有可能的音频直链
+            match = re.search(r"http[^\s\"']+\.m4a[^\s\"']*", resp.text)
+            if match:
+                return match.group(0)
+        except Exception as e:
+            self.log(f"获取音频链接失败: {e}")
+        return None
+
+    def _download_file(self, url, title, index):
+        """下载单个文件，支持断点续传"""
+        safe_title = re.sub(r'[\\/*?:"<>|]', "_", title)
+        filename = f"{index:03d}_{safe_title}.m4a"
+        filepath = os.path.join(self.save_folder, filename)
+
+        # 检查已存在文件
+        if os.path.exists(filepath):
+            self.log(f"文件已存在，跳过: {filename}")
+            return
+
+        headers = {"User-Agent": "Mozilla/5.0"}
+        try:
+            with requests.get(url, headers=headers, stream=True, timeout=30) as r:
+                r.raise_for_status()
+                total_size = int(r.headers.get('content-length', 0))
+                downloaded = 0
+                with open(filepath, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if self.cancelled:
+                            f.close()
+                            os.remove(filepath)
+                            return
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                self.log(f"下载完成: {filename}")
+        except Exception as e:
+            self.log(f"下载失败 {filename}: {e}")
+            if os.path.exists(filepath):
+                os.remove(filepath)
 
     def stop_download(self):
-        self.downloading = False
-        self.stop_btn.configure(state=tk.DISABLED)
-        self.download_btn.configure(state=tk.NORMAL)
-        self.retry_btn.configure(state=tk.NORMAL if self.failed_chapters else tk.DISABLED)
-        self.log("用户中止下载。")
+        self.cancelled = True
+        self.log("正在停止...")
 
-    def download_all(self, save_folder, chapter_list):
-        total = len(chapter_list)
-        for idx, (chapter_name, play_url) in enumerate(chapter_list, 1):
-            if not self.downloading:
-                break
-            safe_chapter = sanitize_filename(chapter_name)
-            ext = ".m4a"
-            file_path = os.path.join(save_folder, safe_chapter + ext)
-            if os.path.exists(file_path):
-                self.log(f"[{idx}/{total}] {chapter_name} 已存在，跳过")
-                self.success_count += 1
-                self.update_stats()
-                continue
-
-            success = False
-            last_error = ""
-            for attempt in range(1, 4):
-                if not self.downloading:
-                    break
-                try:
-                    audio_url = get_audio_url(play_url)
-                    self.log(f"[{idx}/{total}] 正在下载：{chapter_name}（尝试 {attempt}/3）")
-                    self._download_file(audio_url, file_path)
-                    success = True
-                    self.success_count += 1
-                    self.update_stats()
-                    break
-                except DownloadAborted:
-                    self.log(f"下载中止：{chapter_name}")
-                    break
-                except Exception as e:
-                    last_error = str(e)
-                    if attempt < 3:
-                        self.log(f"下载失败，1秒后重试：{chapter_name} - {last_error}")
-                        time.sleep(1)
-                    else:
-                        self.log(f"❌ 最终失败：{chapter_name} - {last_error}")
-
-            if not success and self.downloading:
-                self.fail_count += 1
-                self.update_stats()
-                self.failed_chapters.append({
-                    "book": self.book_title,
-                    "anchor": self.anchor,
-                    "chapter": chapter_name,
-                    "url": play_url,
-                    "error": last_error
-                })
-
-        self.downloading = False
-        self.root.after(0, self._download_finished, save_folder)
-
-    def _download_file(self, url, save_path):
-        with requests.get(url, headers=HEADERS, stream=True, timeout=30, verify=False) as r:
-            r.raise_for_status()
-            with open(save_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    if not self.downloading:
-                        raise DownloadAborted("用户中止")
-                    if chunk:
-                        f.write(chunk)
-
-    def _download_finished(self, save_folder):
-        self.download_btn.configure(state=tk.NORMAL)
-        self.stop_btn.configure(state=tk.DISABLED)
-        if self.failed_chapters:
-            json_path = os.path.join(save_folder, "failed_chapters.json")
-            try:
-                with open(json_path, 'w', encoding='utf-8') as f:
-                    json.dump(self.failed_chapters, f, ensure_ascii=False, indent=2)
-                self.log(f"⚠️ 有 {len(self.failed_chapters)} 个章节下载失败，已记录至：{json_path}")
-            except Exception as e:
-                self.log(f"无法写入失败记录文件：{e}")
-            self.retry_btn.configure(state=tk.NORMAL)
-        else:
-            if os.path.exists(os.path.join(save_folder, "failed_chapters.json")):
-                os.remove(os.path.join(save_folder, "failed_chapters.json"))
-            self.log("✅ 所有章节下载完成。")
-            self.retry_btn.configure(state=tk.DISABLED)
-        self.update_stats()
-
+# 程序入口
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = AudioDownloaderApp(root)
-    root.update_idletasks()
-    w = root.winfo_width()
-    h = root.winfo_height()
-    x = (root.winfo_screenwidth() - w) // 2
-    y = (root.winfo_screenheight() - h) // 2
-    root.geometry(f"{w}x{h}+{x}+{y}")
-    root.mainloop()
+    app = AudioBookDownloader()
+    app.mainloop()

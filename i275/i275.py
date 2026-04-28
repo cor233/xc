@@ -1,15 +1,13 @@
 import os
-import sys
+import re
 import json
 import time
 import threading
-from pathlib import Path
 from urllib.parse import quote
 import requests
 from bs4 import BeautifulSoup
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
-from tkinter.ttk import Progressbar
 
 BASE_URL = "https://m.i275.com"
 HEADERS = {
@@ -39,15 +37,19 @@ def search_books(keyword):
     soup = BeautifulSoup(html, 'html.parser')
     books = []
     for a_tag in soup.select('a[href^="/book/"]'):
-        parent = a_tag.find_parent('div', class_='flex') or a_tag.find_parent('a')
-        if not parent:
-            continue
-        title_elem = parent.select_one('h3') or a_tag.find_next('h3')
-        anchor_elem = parent.select_one('p span') or parent.find('span', class_='bg-gray-100')
+        title_elem = a_tag.select_one('h3')
         if not title_elem:
             continue
         title = title_elem.get_text(strip=True)
-        anchor = anchor_elem.get_text(strip=True) if anchor_elem else "未知演播"
+        anchor = "未知演播"
+        spans = a_tag.find_all('span', class_=lambda c: c and 'bg-gray-100' in c)
+        for span in spans:
+            if span.get_text(strip=True) == '演播':
+                parent_p = span.find_parent('p')
+                if parent_p:
+                    full_text = parent_p.get_text(strip=True)
+                    anchor = full_text.replace('演播', '').strip()
+                break
         book_url = a_tag['href']
         books.append((title, anchor, book_url))
     seen = set()
@@ -113,6 +115,9 @@ class AudioDownloaderApp:
         self.save_path = os.getcwd()
         self.downloading = False
         self.failed_chapters = []
+        self.total_chapters = 0
+        self.success_count = 0
+        self.fail_count = 0
 
         self.create_widgets()
 
@@ -171,15 +176,17 @@ class AudioDownloaderApp:
         self.download_btn.pack(side=tk.RIGHT, padx=(5,0))
         self.download_btn.configure(state=tk.DISABLED)
 
+        self.retry_btn = ttk.Button(btn_frame, text="重试失败", width=10, command=self.retry_failed, state=tk.DISABLED)
+        self.retry_btn.pack(side=tk.RIGHT, padx=(5,0))
+
         self.stop_btn = ttk.Button(btn_frame, text="停止", width=10, command=self.stop_download, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.RIGHT)
 
-        log_frame = ttk.LabelFrame(right_frame, text="下载进度", padding=5)
+        log_frame = ttk.LabelFrame(right_frame, text="下载统计", padding=5)
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(10,0))
 
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = Progressbar(log_frame, variable=self.progress_var, maximum=100)
-        self.progress_bar.pack(fill=tk.X, pady=(0,5))
+        self.stats_label = ttk.Label(log_frame, text="就绪", font=('微软雅黑', 11, 'bold'))
+        self.stats_label.pack(anchor='w', pady=(0,5))
 
         self.log_text = scrolledtext.ScrolledText(log_frame, height=8, font=('Consolas', 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
@@ -188,6 +195,9 @@ class AudioDownloaderApp:
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
         self.root.update_idletasks()
+
+    def update_stats(self):
+        self.stats_label.config(text=f"总计 {self.total_chapters}  已完成 {self.success_count}  失败 {self.fail_count}")
 
     def start_search(self):
         keyword = self.search_entry.get().strip()
@@ -233,6 +243,7 @@ class AudioDownloaderApp:
         self.info_label.config(text=f"{book_title}　　{anchor_main} 演播")
         self.chapter_count_label.config(text=f"共 {len(chapters)} 章")
         self.download_btn.configure(state=tk.NORMAL)
+        self.retry_btn.configure(state=tk.DISABLED)
         self.log(f"已选择：《{book_title}》共 {len(chapters)} 章。")
 
     def choose_directory(self):
@@ -257,21 +268,57 @@ class AudioDownloaderApp:
             return
         self.downloading = True
         self.failed_chapters = []
+        self.total_chapters = len(self.chapters)
+        self.success_count = 0
+        self.fail_count = 0
+        self.update_stats()
         self.download_btn.configure(state=tk.DISABLED)
+        self.retry_btn.configure(state=tk.DISABLED)
         self.stop_btn.configure(state=tk.NORMAL)
-        self.progress_var.set(0)
-        threading.Thread(target=self.download_all, args=(save_folder,), daemon=True).start()
+        threading.Thread(target=self.download_all, args=(save_folder, self.chapters), daemon=True).start()
+
+    def retry_failed(self):
+        if self.downloading:
+            return
+        base_dir = self.save_path
+        folder_name = sanitize_filename(f"{self.book_title}-{self.anchor}")
+        save_folder = os.path.join(base_dir, folder_name)
+        json_path = os.path.join(save_folder, "failed_chapters.json")
+        if not os.path.exists(json_path):
+            messagebox.showinfo("提示", "没有失败记录")
+            return
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                failed = json.load(f)
+        except Exception as e:
+            messagebox.showerror("读取失败", str(e))
+            return
+        if not failed:
+            messagebox.showinfo("提示", "没有失败章节")
+            return
+        retry_list = [(item['chapter'], item['url']) for item in failed]
+        self.total_chapters = len(retry_list)
+        self.success_count = 0
+        self.fail_count = 0
+        self.update_stats()
+        self.downloading = True
+        self.failed_chapters = []
+        self.download_btn.configure(state=tk.DISABLED)
+        self.retry_btn.configure(state=tk.DISABLED)
+        self.stop_btn.configure(state=tk.NORMAL)
+        self.log("开始重试失败章节...")
+        threading.Thread(target=self.download_all, args=(save_folder, retry_list), daemon=True).start()
 
     def stop_download(self):
         self.downloading = False
         self.stop_btn.configure(state=tk.DISABLED)
         self.download_btn.configure(state=tk.NORMAL)
+        self.retry_btn.configure(state=tk.NORMAL if self.failed_chapters else tk.DISABLED)
         self.log("用户中止下载。")
 
-    def download_all(self, save_folder):
-        total = len(self.chapters)
-        downloaded = 0
-        for idx, (chapter_name, play_url) in enumerate(self.chapters, 1):
+    def download_all(self, save_folder, chapter_list):
+        total = len(chapter_list)
+        for idx, (chapter_name, play_url) in enumerate(chapter_list, 1):
             if not self.downloading:
                 break
             safe_chapter = sanitize_filename(chapter_name)
@@ -279,8 +326,8 @@ class AudioDownloaderApp:
             file_path = os.path.join(save_folder, safe_chapter + ext)
             if os.path.exists(file_path):
                 self.log(f"[{idx}/{total}] {chapter_name} 已存在，跳过")
-                downloaded += 1
-                self.progress_var.set((downloaded / total) * 100)
+                self.success_count += 1
+                self.update_stats()
                 continue
 
             success = False
@@ -293,8 +340,8 @@ class AudioDownloaderApp:
                     self.log(f"[{idx}/{total}] 正在下载：{chapter_name}（尝试 {attempt}/3）")
                     self._download_file(audio_url, file_path)
                     success = True
-                    downloaded += 1
-                    self.progress_var.set((downloaded / total) * 100)
+                    self.success_count += 1
+                    self.update_stats()
                     break
                 except DownloadAborted:
                     self.log(f"下载中止：{chapter_name}")
@@ -308,6 +355,8 @@ class AudioDownloaderApp:
                         self.log(f"❌ 最终失败：{chapter_name} - {last_error}")
 
             if not success and self.downloading:
+                self.fail_count += 1
+                self.update_stats()
                 self.failed_chapters.append({
                     "book": self.book_title,
                     "anchor": self.anchor,
@@ -340,8 +389,13 @@ class AudioDownloaderApp:
                 self.log(f"⚠️ 有 {len(self.failed_chapters)} 个章节下载失败，已记录至：{json_path}")
             except Exception as e:
                 self.log(f"无法写入失败记录文件：{e}")
+            self.retry_btn.configure(state=tk.NORMAL)
         else:
+            if os.path.exists(os.path.join(save_folder, "failed_chapters.json")):
+                os.remove(os.path.join(save_folder, "failed_chapters.json"))
             self.log("✅ 所有章节下载完成。")
+            self.retry_btn.configure(state=tk.DISABLED)
+        self.update_stats()
 
 if __name__ == "__main__":
     root = tk.Tk()

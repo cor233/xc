@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
-BASE_URL = "https://m.i275.com"
+BASE_URL = "https://www.i275.com"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0",
     "Referer": BASE_URL
@@ -26,8 +26,11 @@ def sanitize_filename(name):
     name = name.strip('. ')
     return name
 
-def fetch_url(url):
-    resp = requests.get(url, headers=HEADERS, timeout=15)
+def fetch_url(url, referer=None):
+    headers = HEADERS.copy()
+    if referer:
+        headers['Referer'] = referer
+    resp = requests.get(url, headers=headers, timeout=15)
     resp.raise_for_status()
     resp.encoding = resp.apparent_encoding
     return resp.text
@@ -60,21 +63,26 @@ def search_books(keyword):
 
 def get_book_info(book_url):
     url = BASE_URL + book_url
-    html = fetch_url(url)
+    html = fetch_url(url, referer=BASE_URL)
     soup = BeautifulSoup(html, 'html.parser')
     title = "未知书名"
-    info_div = soup.find('div', class_='space-y-1')
-    if info_div:
-        prev_h1 = info_div.find_previous('h1')
-        if prev_h1:
-            title = prev_h1.get_text(strip=True)
+    h1 = soup.select_one('h1.text-2xl.font-bold')
+    if h1:
+        title = h1.get_text(strip=True)
     if title == "未知书名":
-        h1_tags = soup.select('h1')
-        for h in h1_tags:
-            if '275听书' not in h.get_text() and '海量' not in h.get_text():
-                title = h.get_text(strip=True)
+        info_div = soup.find('div', class_='space-y-1')
+        if info_div:
+            prev_h1 = info_div.find_previous('h1')
+            if prev_h1:
+                title = prev_h1.get_text(strip=True)
+    if title == "未知书名":
+        for h in soup.select('h1'):
+            txt = h.get_text()
+            if '275听书' not in txt and '海量' not in txt and '免费' not in txt:
+                title = txt.strip()
                 break
     anchor = "未知"
+    info_div = soup.find('div', class_='space-y-1')
     if info_div:
         for p in info_div.find_all('p'):
             text = p.get_text()
@@ -93,19 +101,16 @@ def get_book_info(book_url):
 
 def get_audio_url(play_url):
     url = BASE_URL + play_url
-    html = fetch_url(url)
-    m4a_urls = re.findall(r'(https?://[^"\'\s]+\.m4a[^"\'\s]*)', html)
-    if m4a_urls:
-        return m4a_urls[0]
-    match = re.search(r"url:\s*'([^']+)'", html)
+    html = fetch_url(url, referer=url)
+    match = re.search(r"url:\s*'([^']+)'", html, re.DOTALL)
     if match:
         return match.group(1).replace('\\/', '/')
-    match = re.search(r'url:\s*"([^"]+)"', html)
+    match = re.search(r'url:\s*"([^"]+)"', html, re.DOTALL)
     if match:
         return match.group(1).replace('\\/', '/')
-    match = re.search(r'https?://[^"\'\s]+\.m4a', html)
-    if match:
-        return match.group(0)
+    matches = re.findall(r'(https?://[^"\'\s]+\.m4a[^"\'\s]*)', html)
+    if matches:
+        return matches[0]
     raise RuntimeError("未找到音频地址")
 
 class DownloadAborted(Exception):

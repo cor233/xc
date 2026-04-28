@@ -11,7 +11,7 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 
 BASE_URL = "https://m.i275.com"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0"
 }
 
 ILLEGAL_CHAR_MAP = {
@@ -114,7 +114,7 @@ class DownloadAborted(Exception):
 class AudioDownloaderApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("275听书网有声小说下载器")
+        self.root.title("i275听书有声书下载器")
         self.root.geometry("900x650")
         self.root.minsize(800, 600)
 

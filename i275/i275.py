@@ -11,7 +11,8 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 
 BASE_URL = "https://m.i275.com"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0",
+    "Referer": BASE_URL
 }
 
 ILLEGAL_CHAR_MAP = {
@@ -45,13 +46,7 @@ def search_books(keyword):
         for p in a_tag.find_all('p'):
             text = p.get_text(strip=True)
             if '演播' in text:
-                parts = text.split()
-                if len(parts) > 1:
-                    anchor = parts[-1]
-                elif '：' in text:
-                    anchor = text.split('：')[-1].strip()
-                elif ':' in text:
-                    anchor = text.split(':')[-1].strip()
+                anchor = text.replace('演播', '', 1).strip()
                 break
         book_url = a_tag['href']
         books.append((title, anchor, book_url))
@@ -99,13 +94,18 @@ def get_book_info(book_url):
 def get_audio_url(play_url):
     url = BASE_URL + play_url
     html = fetch_url(url)
-    urls = re.findall(r'(https?://[^"\'\s]+\.m4a[^"\'\s]*)', html)
-    if urls:
-        return urls[0]
-    pattern = r"url:\s*['\"]([^'\"]+)"
-    match = re.search(pattern, html)
+    m4a_urls = re.findall(r'(https?://[^"\'\s]+\.m4a[^"\'\s]*)', html)
+    if m4a_urls:
+        return m4a_urls[0]
+    match = re.search(r"url:\s*'([^']+)'", html)
     if match:
         return match.group(1).replace('\\/', '/')
+    match = re.search(r'url:\s*"([^"]+)"', html)
+    if match:
+        return match.group(1).replace('\\/', '/')
+    match = re.search(r'https?://[^"\'\s]+\.m4a', html)
+    if match:
+        return match.group(0)
     raise RuntimeError("未找到音频地址")
 
 class DownloadAborted(Exception):
@@ -114,7 +114,7 @@ class DownloadAborted(Exception):
 class AudioDownloaderApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("i275听书有声书下载器")
+        self.root.title("i275有声书下载工具")
         self.root.geometry("900x650")
         self.root.minsize(800, 600)
 

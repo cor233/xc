@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+
 import os
 import re
 import json
@@ -9,7 +12,7 @@ from bs4 import BeautifulSoup
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
-BASE_URL = "https://www.i275.com"
+BASE_URL = "https://m.i275.com"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0",
     "Referer": BASE_URL
@@ -26,11 +29,8 @@ def sanitize_filename(name):
     name = name.strip('. ')
     return name
 
-def fetch_url(url, referer=None):
-    headers = HEADERS.copy()
-    if referer:
-        headers['Referer'] = referer
-    resp = requests.get(url, headers=headers, timeout=15)
+def fetch_url(url):
+    resp = requests.get(url, headers=HEADERS, timeout=15, verify=False)
     resp.raise_for_status()
     resp.encoding = resp.apparent_encoding
     return resp.text
@@ -63,7 +63,7 @@ def search_books(keyword):
 
 def get_book_info(book_url):
     url = BASE_URL + book_url
-    html = fetch_url(url, referer=BASE_URL)
+    html = fetch_url(url)
     soup = BeautifulSoup(html, 'html.parser')
     title = "未知书名"
     h1 = soup.select_one('h1.text-2xl.font-bold')
@@ -101,7 +101,7 @@ def get_book_info(book_url):
 
 def get_audio_url(play_url):
     url = BASE_URL + play_url
-    html = fetch_url(url, referer=url)
+    html = fetch_url(url)
     match = re.search(r"url:\s*'([^']+)'", html, re.DOTALL)
     if match:
         return match.group(1).replace('\\/', '/')
@@ -389,7 +389,7 @@ class AudioDownloaderApp:
         self.root.after(0, self._download_finished, save_folder)
 
     def _download_file(self, url, save_path):
-        with requests.get(url, headers=HEADERS, stream=True, timeout=30) as r:
+        with requests.get(url, headers=HEADERS, stream=True, timeout=30, verify=False) as r:
             r.raise_for_status()
             with open(save_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):

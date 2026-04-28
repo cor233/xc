@@ -42,13 +42,16 @@ def search_books(keyword):
             continue
         title = title_elem.get_text(strip=True)
         anchor = "未知演播"
-        spans = a_tag.find_all('span', class_=lambda c: c and 'bg-gray-100' in c)
-        for span in spans:
-            if span.get_text(strip=True) == '演播':
-                parent_p = span.find_parent('p')
-                if parent_p:
-                    full_text = parent_p.get_text(strip=True)
-                    anchor = full_text.replace('演播', '').strip()
+        for p in a_tag.find_all('p'):
+            text = p.get_text(strip=True)
+            if '演播' in text:
+                parts = text.split()
+                if len(parts) > 1:
+                    anchor = parts[-1]
+                elif '：' in text:
+                    anchor = text.split('：')[-1].strip()
+                elif ':' in text:
+                    anchor = text.split(':')[-1].strip()
                 break
         book_url = a_tag['href']
         books.append((title, anchor, book_url))
@@ -64,8 +67,18 @@ def get_book_info(book_url):
     url = BASE_URL + book_url
     html = fetch_url(url)
     soup = BeautifulSoup(html, 'html.parser')
-    title = soup.select_one('h1').get_text(strip=True) if soup.select_one('h1') else "未知书名"
+    title = "未知书名"
     info_div = soup.find('div', class_='space-y-1')
+    if info_div:
+        prev_h1 = info_div.find_previous('h1')
+        if prev_h1:
+            title = prev_h1.get_text(strip=True)
+    if title == "未知书名":
+        h1_tags = soup.select('h1')
+        for h in h1_tags:
+            if '275听书' not in h.get_text() and '海量' not in h.get_text():
+                title = h.get_text(strip=True)
+                break
     anchor = "未知"
     if info_div:
         for p in info_div.find_all('p'):
@@ -86,12 +99,14 @@ def get_book_info(book_url):
 def get_audio_url(play_url):
     url = BASE_URL + play_url
     html = fetch_url(url)
-    pattern = r"url:\s*'([^']+)'"
+    urls = re.findall(r'(https?://[^"\'\s]+\.m4a[^"\'\s]*)', html)
+    if urls:
+        return urls[0]
+    pattern = r"url:\s*['\"]([^'\"]+)"
     match = re.search(pattern, html)
-    if not match:
-        raise RuntimeError("未找到音频地址")
-    audio_url = match.group(1).replace('\\/', '/')
-    return audio_url
+    if match:
+        return match.group(1).replace('\\/', '/')
+    raise RuntimeError("未找到音频地址")
 
 class DownloadAborted(Exception):
     pass

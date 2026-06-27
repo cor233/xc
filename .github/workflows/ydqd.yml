@@ -23,4 +23,4 @@ jobs:
         env:
           yunpan: ${{ secrets.YUNPAN_TOKEN }}
           yunpan_device_id: ${{ secrets.YUNPAN_DEVICE_ID }}
-        run: python ydqd.py
+        run: python yunpan.py

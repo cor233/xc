@@ -194,6 +194,7 @@ RED_PACKET_KNOWN_ANSWERS = {
 RED_PACKET_MANUAL_TASKS = {
     'NOVICE_1': '需跳转领取定向流量',
 }
+AI_CAMERA_SAMPLE_BASE64 = "data:image/jpg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAkGBxAQEBUQEBAVFRUVFRUVFRUVFRUVFRUVFRUWFhUVFRUYHSggGBolHRUVITEhJSkrLi4uFx8zODMsNygtLisBCgoKDg0OGhAQGi0lHyUtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLf/AABEIAAEAAQMBIgACEQEDEQH/xAAXAAEBAQEAAAAAAAAAAAAAAAAAAQID/8QAFhEBAQEAAAAAAAAAAAAAAAAAABEh/9oADAMBAAIQAxAAAAHhAH//xAAZEAEBAQEBAQAAAAAAAAAAAAABEQIhMUH/2gAIAQEAAT8A2M4Kxqf/xAAWEQEBAQAAAAAAAAAAAAAAAAAAESH/2gAIAQIBAT8Ap//EABYRAQEBAAAAAAAAAAAAAAAAAAABEf/aAAgBAwEBPwCf/9k="
 err_accounts = ''
 all_logs = ''
 user_amount = ''
@@ -1079,11 +1080,7 @@ class YP:
         headers['x-DeviceInfo'] = f'||36|{self.client_version}||MI 8|{uuid.uuid4()}||android 10|||||'
         return headers
     def get_ai_camera_sample_base64(self):
-        sample_path = path.join(path.abspath(path.dirname(__file__)), 'assets', 'ai_camera_sample.jpg')
-        if not path.exists(sample_path):
-            return ''
-        with open(sample_path, 'rb') as file:
-            return f"data:image/jpg;base64,{base64.b64encode(file.read()).decode()}"
+        return AI_CAMERA_SAMPLE_BASE64
     @staticmethod
     def is_ai_chat_success(text):
         payloads = []
@@ -1108,8 +1105,8 @@ class YP:
             return False
         image_data = self.get_ai_camera_sample_base64()
         if not image_data:
-            self.log('AI相机任务失败: 缺少样图')
-            return False
+            self.log('AI相机任务跳过: 无样图数据')
+            return True
         recognize_payload = json.dumps({
             'channelId': '101',
             'userId': self.user_domain_id,
@@ -1772,7 +1769,14 @@ class YP:
             self.prepare_signin_center_session(for_receive=True)
             receive_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/receiveV3',
                                                     params={'client': 'app'},
-                                                    headers=self.build_receive_headers())
+                                                    headers=self.build_receive_headers(),
+                                                    retries=2)
+            if not receive_data or receive_data.get('code') != 0:
+                self.log('V3领取失败，尝试V2')
+                receive_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/receiveV2',
+                                                        params={'client': 'app'},
+                                                        headers=self.build_receive_headers(),
+                                                        retries=2)
             if not receive_data:
                 self.log('领取云朵失败: 接口无响应')
                 self.log(f'-当前待领取:{pending_amount}云朵')
@@ -1887,15 +1891,16 @@ class YP:
         login_url = f'{RED_PACKET_BASE_URL}/ticket/login'
         login_headers = {
             'Content-Type': 'application/json',
-            'User-Agent': ua,
+            'User-Agent': market_ua,
             'Accept': '*/*',
             'Host': 'cpactiv.buy.139.com',
+            'Referer': RED_PACKET_PAGE_URL,
+            'Origin': 'https://cpactiv.buy.139.com',
         }
-        import requests as _requests
         try:
-            resp = _requests.post(login_url, headers=login_headers,
-                                  json={'token': token, 'sourceId': RED_PACKET_SOURCE_ID},
-                                  timeout=15)
+            resp = self.session.post(login_url, headers=login_headers,
+                                     json={'token': token, 'sourceId': RED_PACKET_SOURCE_ID},
+                                     timeout=15)
             if resp.status_code == 200:
                 login_data = resp.json()
             else:

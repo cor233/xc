@@ -20,7 +20,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller requests pycryptodome
-          # 如果还需要其他依赖，请在此添加
+          if (Test-Path tyfm/requirements.txt) { pip install -r tyfm/requirements.txt }
 
       - name: 打包成 EXE
         run: |
@@ -31,7 +31,7 @@ jobs:
             --hidden-import Crypto.Cipher.AES `
             --hidden-import Crypto.Random `
             --collect-all Crypto `
-            tyfm.py
+            tyfm/tyfm.py
 
       - name: 上传 Artifact
         uses: actions/upload-artifact@v4

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# 移动云盘自动签到 v6.0.0
+# 依据 caiyun-master(Go版, 基线 mCloud 13.2.2 / 2026-09-30 协议) 升级:
+#   +) taskListV3 / doTaskPost登记 / receiveTask领奖 / 逐项receiveV3领云朵 / getUserPrizeLogPageV2
+#   +) 新任务ID行为映射(上传/照片/AI相机), 多轮进度推进
+#   -) 移除已失效: 摇一摇 shake、红包派对 red_envelope_party、合成1T cloud_game、果园 do_fruit_task、戳一戳click
 
 import base64
 import hashlib
@@ -23,7 +28,7 @@ except ImportError:
     AES = None
     pad = None
 
-SCRIPT_VERSION = '5.1.3'
+SCRIPT_VERSION = '6.0.0'
 DEVICE_ID_STORAGE_FILENAME = 'yunpan_device_ids.json'
 JS_CACHE_DIR = 'data'
 JS_CACHE_FILE = 'yunpan_token_cache.json'
@@ -158,43 +163,23 @@ def fetch_device_id():
 cloud_file_dummy_content = b'0'
 cloud_file_dummy_hash = hashlib.sha256(cloud_file_dummy_content).hexdigest()
 TOKEN_VALID_TIME = 21600000
-TOKEN_REFRESH_ADVANCE = 24 * 60 * 60 * 1000
-TOKEN_REFRESH_COOLDOWN = 864000
+TOKEN_EXPIRE_SECONDS_FALLBACK = 2592000
 FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000
 REFRESH_TOKEN_AES_KEY = 'c7lXOigXahPnTViq'
-AI_TOOL_ACCOUNT_AES_KEY = 'xuL97!x7GGxG%8V4'
-AI_TOOL_ACCOUNT_AES_IV = '5OuCxk4XNu0NA*%x'
-TOKEN_EXPIRE_SECONDS_FALLBACK = 2592000
-RED_PACKET_SOURCE_ID = '001216'
-RED_PACKET_VERSION = 'SYS_CONFIG_Y'
-RED_PACKET_BASE_URL = 'https://cpactiv.buy.139.com/cloudphone-market'
-RED_PACKET_PAGE_URL = 'https://cpactiv.buy.139.com/#/redEnvelopeParty/home?channelSrc=red-cmccapp'
-RED_PACKET_APP_ID = '12345681'
-RED_PACKET_SIGN_KEY = 'e10adc3949ba59abbe56e057f20f883e'
-RED_PACKET_CHANNEL_SRC = 'red-cmccapp'
-RED_PACKET_BROWSE_TASKS = {'NOVICE_2', 'NOVICE_3', 'MONTHLY_1'}
-RED_PACKET_DIRECT_TASKS = {'MONTHLY_4', 'MONTHLY_5'}
-RED_PACKET_KNOWN_ANSWERS = {
-    '如何查看并更新移动云手机客户端最新版本？': '进入"我的"-点击"关于云手机"-点击"检查新版本"',
-    '移动云手机可领取定向流量，每月赠送的定向流量是（  ）。': '30GB',
-    '移动云手机端内订购的专业版分辨率已升级到1080P，该说法是否正确？': '正确',
-    '移动云手机支持视频录制，该说法是否正确？': '正确',
-    '云手机支持通过手机、平板、电脑等多种终端设备登录使用，该说法是否正确？': '正确',
-    '使用中国移动号码登录移动云手机，是否支持手机号一键登录？': '支持',
-    '只有中国移动运营商号码能使用移动云手机？': '不正确',
-    '移动云手机是否需要充电使用？': '不需要',
-    '移动云手机支持截图，该说法是否正确？': '正确',
-    '移动云手机AI灵犀助手已接入DeepSeek，是否正确？': '正确',
-    '移动云手机内支持画面清晰度切换，该说法是否正确？': '正确',
-    '移动云手机支持连接蓝牙使用吗？': '不支持',
-    '在云手机内安装游戏应用是否占本地手机存储空间？': '否，不占本地空间',
-    '如何更换云机内的桌面主题或壁纸？': '云机内-【设置】-壁纸/个性主题',
-    '如何将云手机里的应用添加至本地手机桌面？': '云手机桌面-长按应用-发送图标到本地',
-}
-RED_PACKET_MANUAL_TASKS = {
-    'NOVICE_1': '需跳转领取定向流量',
-}
 AI_CAMERA_SAMPLE_BASE64 = "data:image/jpg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAkGBxAQEBUQEBAVFRUVFRUVFRUVFRUVFRUVFRUWFhUVFRUYHSggGBolHRUVITEhJSkrLi4uFx8zODMsNygtLisBCgoKDg0OGhAQGi0lHyUtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLf/AABEIAAEAAQMBIgACEQEDEQH/xAAXAAEBAQEAAAAAAAAAAAAAAAAAAQID/8QAFhEBAQEAAAAAAAAAAAAAAAAAABEh/9oADAMBAAIQAxAAAAHhAH//xAAZEAEBAQEBAQAAAAAAAAAAAAABEQIhMUH/2gAIAQEAAT8A2M4Kxqf/xAAWEQEBAQAAAAAAAAAAAAAAAAAAESH/2gAIAQIBAT8Ap//EABYRAQEBAAAAAAAAAAAAAAAAAAABEf/aAAgBAwEBPwCf/9k="
+
+# V3 任务行为映射 (对齐 Go 版 tasklist.go, 基线 13.2.2)
+# 真实云盘文件动作驱动(上传): 106/110/113 及签到中心上传类
+V3_UPLOAD_TASK_IDS = {106, 110, 113, 319, 409, 431, 604, 1003, 1005, 1017, 1055}
+# 照片上传类
+V3_PHOTO_TASK_IDS = {614, 615, 1080, 1081}
+# AI相机/拍照问AI
+V3_AICAMERA_TASK_IDS = {585, 616, 618, 1082, 1084}
+# 上述任务需要"真实行为 + doTaskPost登记"最多推进4轮
+V3_MULTIRound_TASK_IDS = V3_UPLOAD_TASK_IDS | V3_PHOTO_TASK_IDS | V3_AICAMERA_TASK_IDS | {609, 617, 1083, 522}
+# 依赖外部条件/需手动或独立处理的任务
+V3_MANUAL_TASK_IDS = {105, 120, 406, 478, 547, 609, 617, 1083}
+
 err_accounts = ''
 all_logs = ''
 user_amount = ''
@@ -353,9 +338,6 @@ def update_cache_authorization(account, authorization):
     })
     accounts[account] = existing
     save_js_cache(cache)
-def get_js_cached_token(account):
-    entry = get_token_info(account)
-    return normalize_authorization(entry.get('token', ''))
 def get_device_id_storage_path():
     return get_storage_file_path(DEVICE_ID_STORAGE_FILENAME)
 def load_device_id_storage():
@@ -441,9 +423,8 @@ class YP:
             self.note_token = None
             self.note_auth = None
             self.auth_token = None
-            self.click_num = 15
             self.draw = 1
-            self.client_version = '13.0.0'
+            self.client_version = '13.2.2'
             self.market_base_url = 'https://m.mcloud.139.com'
             self.market_source_id = '1097'
             self.sso_token = None
@@ -455,8 +436,6 @@ class YP:
             self.market_device_is_placeholder = False
             self.market_headers = {}
             self.market_cookies = {}
-            self.red_packet_token = ''
-            self.red_packet_mobile = ''
             self.session = requests.Session()
             self.user_log_lines = []
             self.timestamp = str(int(round(time.time() * 1000)))
@@ -474,18 +453,10 @@ class YP:
                 self.encrypt_account = self.account[:3] + "****" + self.account[-4:]
             else:
                 self.encrypt_account = self.account
-            self.fruit_url = 'https://happy.mail.10086.cn/jsp/cn/garden/'
             self.jwtHeaders = {
                 'User-Agent': ua,
                 'Accept': '*/*',
                 'Host': 'caiyun.feixin.10086.cn:7071',
-            }
-            self.treeHeaders = {
-                'Host': 'happy.mail.10086.cn',
-                'Accept': 'application/json, text/plain, */*',
-                'User-Agent': ua,
-                'Referer': 'https://happy.mail.10086.cn/jsp/cn/garden/wap/index.html?sourceid=1003',
-                'Cookie': '',
             }
         except Exception as e:
             print(f"{e}")
@@ -499,8 +470,6 @@ class YP:
                 'expiresAt': entry.get('expireAt', 0),
                 'lastRefreshAt': entry.get('updatedAt', 0),
                 'userDomainId': entry.get('userDomainId', ''),
-                'redPacketToken': entry.get('redPacketToken', ''),
-                'redPacketMobile': entry.get('redPacketMobile', ''),
             }
         return {}
     def load_persisted_authorization(self):
@@ -679,11 +648,9 @@ class YP:
         if self.jwt():
             self.refresh_authorization_token()
             self.signin_status()
-            self.click()
             self.get_tasklist(url='sign_in_3', app_type='cloud_app')
             self.log(f'\n📰 公众号任务')
             self.wxsign()
-            self.shake()
             self.surplus_num()
             self.log(f'\n🔥 热门任务')
             self.backup_cloud()
@@ -691,7 +658,6 @@ class YP:
             self.log(f'\n📧 139邮箱任务')
             self.get_tasklist(url='newsign_139mail', app_type='email_app')
             self.receive()
-            self.red_envelope_party()
             self.sync_token_storage()
             global all_logs
             user_log_str = "\n".join(self.user_log_lines)
@@ -861,6 +827,168 @@ class YP:
         return True
     def click_task(self, task_id, key='task'):
         return self.request_market_json(f'{self.market_base_url}/ycloud/signin/task/click?key={key}&id={task_id}')
+    # ---------- V3 任务中心协议 (对齐 Go 13.2.2) ----------
+    def get_task_list_v3(self, market_name='sign_in_3'):
+        """taskListV3: 扁平任务数组, 替代 V2 分组结构; 失败返回 None 走 V2 回退"""
+        if market_name not in ('sign_in_3', 'newsign_139mail'):
+            return None
+        self.prepare_signin_center_session(False)
+        data = self.request_market_json(
+            f'{self.market_base_url}/ycloud/signin/task/taskListV3',
+            json_body=True, method='POST',
+            headers={'activityId': market_name, 'appVersion': f'{self.client_version}.0'},
+            data={'marketname': market_name, 'client': 0, 'clientVersion': self.client_version},
+            retries=2)
+        if not data or data.get('code') != 0 or not isinstance(data.get('result'), list):
+            return None
+        return data['result']
+    def query_task_v3(self, market_name, task_id):
+        tasks = self.get_task_list_v3(market_name)
+        if not tasks:
+            return None
+        for task in tasks:
+            if task.get('id') == task_id:
+                return task
+        return None
+    def do_task_post(self, task_id=None):
+        """doTaskPost: 新版任务中心 deviceId 注册 / 真实行为后任务登记"""
+        device_id = self.get_market_device_id()
+        if not device_id:
+            self.load_or_create_market_device_profile()
+            device_id = self.get_market_device_id()
+        payload = {'client': 'app', 'deviceId': device_id or ''}
+        if task_id:
+            payload['taskId'] = task_id
+        return self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/doTaskPost',
+                                        json_body=True, method='POST',
+                                        headers={'activityId': 'sign_in_3',
+                                                 'appVersion': f'{self.client_version}.0'},
+                                        data=payload, retries=1)
+    def register_task_device(self):
+        resp = self.do_task_post()
+        if resp is None:
+            self.log('任务中心deviceId登记: 接口无响应')
+        elif resp.get('code') != 0:
+            self.log(f"任务中心deviceId登记异常: {resp.get('msg', '未知错误')}")
+    def receive_task_reward(self, task_id):
+        """receiveTask: 领取已完成(status=1)未领取的任务奖励"""
+        return self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/receiveTask',
+                                        params={'taskId': task_id})
+    def receive_completed_task_rewards_v3(self, market_name, tasks=None):
+        if tasks is None:
+            tasks = self.get_task_list_v3(market_name) or []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            # V3: state 非空表示按状态推进; status==1 表示完成待领取
+            if task.get('state') or task.get('status') != 1:
+                continue
+            task_id = task.get('id')
+            task_name = self.strip_task_name(task)
+            res = self.receive_task_reward(task_id)
+            if res and res.get('code') == 0:
+                self.log(f'-领取任务奖励成功: {task_name}({task_id})')
+            else:
+                msg = res.get('msg', '未知错误') if res else '接口无响应'
+                self.log(f'-领取任务奖励失败: {task_name}({task_id}) {msg}')
+            time.sleep(0.3)
+    def run_task_list_v3(self, market_name, title):
+        """V3 任务主流程: 先领奖 -> 执行 -> 再领奖; 返回 False 表示需回退 V2"""
+        tasks = self.get_task_list_v3(market_name)
+        if tasks is None:
+            return False
+        self.log(title)
+        self.register_task_device()
+        self.receive_completed_task_rewards_v3(market_name, tasks)
+        for task in tasks:
+            if not isinstance(task, dict) or not task.get('id'):
+                continue
+            try:
+                self.handle_v3_task(market_name, task)
+            except Exception as e:
+                self.log(f'-任务处理异常: {self.strip_task_name(task)} {e}')
+            time.sleep(0.5)
+        self.receive_completed_task_rewards_v3(market_name)
+        return True
+    def handle_v3_task(self, market_name, task):
+        task_id = task.get('id')
+        task_name = self.strip_task_name(task)
+        if task.get('state') == 'FINISH':
+            print(f'-已完成: {task_name}')
+            return
+        if task_id == 406:
+            self.log(self.format_notice_task_log(task_name, self.get_notice_status()))
+            return
+        if task_id == 478:
+            self.log(f'-去完成: {task_name}')
+            click_data = self.click_task(task_id, 'randomCloudTask') or {}
+            if click_data.get('code') == 0:
+                result = click_data.get('result') or {}
+                num = result.get('num', 0)
+                msg = result.get('msg', '')
+                if num:
+                    self.log(f'-已完成: {task_name} 获得{num}云朵 {msg}')
+                else:
+                    self.log(f'-已完成: {task_name} {msg}')
+            else:
+                self.log(f"-需手动完成: {task_name} {click_data.get('msg', '未知错误')}")
+            return
+        # 特殊任务: 真实行为 + doTaskPost 登记, 多任务最多推进4轮
+        action = None
+        max_rounds = 1
+        if task_id in V3_UPLOAD_TASK_IDS:
+            action = self.updata_file
+            max_rounds = 4 if task_id in V3_MULTIRound_TASK_IDS else 1
+        elif task_id in V3_PHOTO_TASK_IDS:
+            action = self.upload_photo_file
+            max_rounds = 4
+        elif task_id in V3_AICAMERA_TASK_IDS:
+            action = self.complete_ai_camera_task
+            max_rounds = 4
+        elif task_id == 107:
+            action = self.do_note_task
+        elif task_id == 434:
+            action = lambda: self.complete_share_file_task(task)
+        elif task_id == 522:
+            action = lambda: self.complete_monthly_upload_task(task)
+        if action is not None:
+            self.log(f'-去完成: {task_name}')
+            for rnd in range(max_rounds):
+                result = action()
+                if result is False:
+                    break
+                post = self.do_task_post(task_id)
+                if post is not None and post.get('code') != 0:
+                    self.log(f"-任务登记返回异常: {post.get('msg', '未知错误')}")
+                if rnd + 1 >= max_rounds:
+                    break
+                time.sleep(1.5)
+                refreshed = self.query_task_v3(market_name, task_id)
+                if not refreshed or refreshed.get('state') == 'FINISH':
+                    break
+                if refreshed.get('currstep', 0) <= task.get('currstep', 0) \
+                        and refreshed.get('process', 0) <= task.get('process', 0):
+                    break
+                task = refreshed
+            refreshed = self.query_task_v3(market_name, task_id) or task
+            if refreshed.get('state') == 'FINISH':
+                self.log(f'-已完成: {task_name}')
+            else:
+                self.log(f'-已登记任务: {task_name}{self.get_task_progress(refreshed)}')
+            return
+        task_keys = self.get_task_click_keys(task)
+        if task_keys:
+            self.log(f'-去完成: {task_name}')
+            for task_key in task_keys:
+                click_data = self.click_task(task_id, task_key)
+                if click_data and click_data.get('code') == 0:
+                    continue
+                msg = click_data.get('msg', '未知错误') if click_data else '接口无响应'
+                self.log(f'-任务登记失败: {task_name} {msg}')
+                return
+            self.log(f'-已登记任务: {task_name}')
+            return
+        self.log(f'-需手动完成: {task_name}{self.get_task_progress(task)}')
     def get_notice_status(self):
         send_data = self.request_json('https://caiyun.feixin.10086.cn/market/msgPushOn/task/status',
                                       headers=self.jwtHeaders) or {}
@@ -914,11 +1042,11 @@ class YP:
             'Referer': 'https://yun.139.com/shareweb/',
             'Origin': 'https://yun.139.com',
         }
-    def create_cloud_file(self, prefix):
+    def create_cloud_file(self, prefix, ext='.txt'):
         beijing_tz = timezone(timedelta(hours=8))
         now = datetime.now(beijing_tz)
         file_size = len(cloud_file_dummy_content)
-        file_name = f"{prefix}{now.strftime('%Y%m%d_%H%M%S')}.txt"
+        file_name = f"{prefix}{now.strftime('%Y%m%d_%H%M%S')}{ext}"
         payload = {
             "contentHash": cloud_file_dummy_hash,
             "contentHashAlgorithm": "SHA256",
@@ -952,6 +1080,15 @@ class YP:
             "fileId": data.get("fileId"),
             "fileName": data.get("fileName", file_name),
         }
+    def upload_photo_file(self):
+        """照片类上传任务 (614/615/1080/1081)"""
+        upload_info = self.create_cloud_file('auto_photo_', '.jpg')
+        if not upload_info:
+            self.log('-照片上传失败: 接口无响应')
+            return False
+        self.log(f"-照片上传成功，文件名: {upload_info.get('fileName', '')}")
+        self.cleanup_uploaded_files(upload_info)
+        return True
     def list_cloud_root_files(self):
         items = []
         page_cursor = ''
@@ -1050,7 +1187,7 @@ class YP:
             msg = result.get('resultDesc') or response.get('message', '未知错误') if response else '接口无响应'
             self.log(f'分享文件失败: {msg}')
             return None
-        return self.query_cloud_task(task.get('id', 434), 'month') or task
+        return self.query_task_v3('sign_in_3', task.get('id', 434)) or self.query_cloud_task(task.get('id', 434), 'month') or task
     def build_ai_headers(self, use_client_info=False):
         headers = {
             'Connection': 'keep-alive',
@@ -1212,13 +1349,6 @@ class YP:
         if task.get('state', '') != 'FINISH':
             return ['task']
         return []
-    def get_cloud_task_groups(self):
-        return [
-            ('cloudEmail', '\n📮 联动任务'),
-            ('time', '\n✨ 新版热门任务'),
-            ('day', '\n📆 云盘每日任务'),
-            ('month', '\n📆 云盘每月任务'),
-        ]
     def query_cloud_task(self, task_id, group='time'):
         return_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/task/taskListV2',
                                                json_body=True, method='POST', data={
@@ -1245,7 +1375,7 @@ class YP:
                 self.log(f'-继续补上传进度: 当前{current_process}/{target_count}，还需{remaining}次')
             for _ in range(remaining):
                 self.updata_file()
-            refreshed_task = self.query_cloud_task(task.get('id', 522), 'time')
+            refreshed_task = self.query_task_v3('sign_in_3', task.get('id', 522)) or self.query_cloud_task(task.get('id', 522), 'time')
             if not refreshed_task:
                 return False
             refreshed_process = int(refreshed_task.get('process') or 0)
@@ -1257,8 +1387,24 @@ class YP:
             current_process = refreshed_process
         self.log(f'-月上传任务进度: {current_process}/{target_count}')
         return False
+    # ---------- 任务列表入口: V3 优先, V2 回退 ----------
+    def get_tasklist(self, url, app_type):
+        if url in ('sign_in_3', 'newsign_139mail'):
+            title = '\n📋 云朵中心任务' if app_type == 'cloud_app' else '\n📧 139邮箱任务'
+            if self.run_task_list_v3(url, title + '(V3)'):
+                if app_type == 'cloud_app':
+                    self.claim_revival_reward()
+                    self.claim_multiple_clouds()
+                    self.cleanup_uploaded_files()
+                return
+            if app_type == 'cloud_app':
+                self.log('V3任务列表不可用，回退V2')
+                self.get_cloud_tasklist_v2()
+                return
+        self.get_tasklist_v2_fallback(url, app_type)
     def get_cloud_tasklist_v2(self):
-        for group, title in self.get_cloud_task_groups():
+        for group, title in (('cloudEmail', '\n📮 联动任务'), ('time', '\n✨ 新版热门任务'),
+                             ('day', '\n📆 云盘每日任务'), ('month', '\n📆 云盘每月任务')):
             return_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/task/taskListV2',
                                                    json_body=True, method='POST', data={
                 'marketname': 'sign_in_3',
@@ -1326,7 +1472,7 @@ class YP:
                 else:
                     self.log(f'-已完成: {task_name} {msg}')
             else:
-                self.log(f'-需手动完成: {task_name} {click_data.get("msg", "未知错误")}')
+                self.log(f"-需手动完成: {task_name} {click_data.get('msg', '未知错误')}")
             return
         task_keys = self.get_task_click_keys(task)
         if task_keys:
@@ -1344,6 +1490,33 @@ class YP:
             self.log(f'-已登记任务: {task_name}')
             return
         self.log(f'-需手动完成: {task_name}{self.get_task_progress(task)}')
+    def get_tasklist_v2_fallback(self, url, app_type):
+        """旧版 V2/老接口回退 (newsign_139mail 等非签到中心渠道)"""
+        req_url = f'https://caiyun.feixin.10086.cn/market/signin/task/taskList?marketname={url}'
+        return_data = self.send_request(req_url, headers=self.jwtHeaders, cookies=self.cookies).json()
+        self.sleep()
+        task_list = return_data.get('result', {})
+        try:
+            for task_type, tasks in task_list.items():
+                if task_type in ["new", "hidden", "hiddenabc"]:
+                    continue
+                if app_type == 'email_app':
+                    if task_type == "month":
+                        self.log('\n📆 139邮箱每月任务')
+                        for month in tasks:
+                            task_id = month.get('id')
+                            task_name = re.sub(r'<[^>]+>', '', month.get('name', ''))
+                            task_status = month.get('state', '')
+                            if task_id in [1004, 1005, 1015, 1020]:
+                                continue
+                            if task_status == 'FINISH':
+                                print(f'-已完成: {task_name}')
+                                continue
+                            self.log(f'-去完成: {task_name}')
+                            self.do_task(task_id, task_type='month', app_type='email_app')
+                            time.sleep(2)
+        except Exception as e:
+            self.log(f'获取任务列表错误:{e}')
     def claim_revival_reward(self):
         try:
             url = f'{self.market_base_url}/ycloud/signin/page/receiveRevivalReward'
@@ -1359,7 +1532,7 @@ class YP:
                 else:
                     self.log('-云朵复活卡: 暂无奖励可领')
             else:
-                self.log(f'-云朵复活卡: {data.get("msg", "未知错误")}')
+                self.log(f"-云朵复活卡: {data.get('msg', '未知错误')}")
         except Exception as e:
             self.log(f'-云朵复活卡失败: {e}')
     def claim_multiple_clouds(self):
@@ -1453,19 +1626,6 @@ class YP:
             self.log('✅签到成功')
             return
         self.log(f"签到失败: {signin_data.get('msg', '未知错误')}")
-    def click(self):
-        successful_click = 0
-        try:
-            for _ in range(self.click_num):
-                return_data = self.click_task(319) or {}
-                time.sleep(0.2)
-                if 'result' in return_data:
-                    self.log(f'✅戳一戳: {return_data["result"]}')
-                    successful_click += 1
-            if successful_click == 0:
-                print(f'❌戳一戳: 未获得 x {self.click_num}')
-        except Exception as e:
-            print(f'错误信息:{e}')
     @catch_errors
     def refresh_notetoken(self):
         note_url = 'http://mnote.caiyun.feixin.10086.cn/noteServer/api/authTokenRefresh.do'
@@ -1493,63 +1653,41 @@ class YP:
             return
         self.note_token = response.headers.get('NOTE_TOKEN')
         self.note_auth = response.headers.get('APP_AUTH')
-    def get_tasklist(self, url, app_type):
-        if url == 'sign_in_3' and app_type == 'cloud_app':
-            self.get_cloud_tasklist_v2()
-            return
-        url = f'https://caiyun.feixin.10086.cn/market/signin/task/taskList?marketname={url}'
-        return_data = self.send_request(url, headers=self.jwtHeaders, cookies=self.cookies).json()
-        self.sleep()
-        task_list = return_data.get('result', {})
-        try:
-            for task_type, tasks in task_list.items():
-                if task_type in ["new", "hidden", "hiddenabc"]:
-                    continue
-                if app_type == 'cloud_app':
-                    if task_type == "month":
-                        self.log('\n📆 云盘每月任务')
-                        for month in tasks:
-                            task_id = month.get('id')
-                            if task_id in [110, 113, 417, 409]:
-                                continue
-                            task_name = re.sub(r'<[^>]+>', '', month.get('name', ''))
-                            task_status = month.get('state', '')
-                            if task_status == 'FINISH':
-                                print(f'-已完成: {task_name}')
-                                continue
-                            self.log(f'-去完成: {task_name}')
-                            self.do_task(task_id, task_type='month', app_type='cloud_app')
-                            time.sleep(2)
-                    elif task_type == "day":
-                        self.log('\n📆 云盘每日任务')
-                        for day in tasks:
-                            task_id = day.get('id')
-                            if task_id == 404:
-                                continue
-                            task_name = re.sub(r'<[^>]+>', '', day.get('name', ''))
-                            task_status = day.get('state', '')
-                            if task_status == 'FINISH':
-                                print(f'-已完成: {task_name}')
-                                continue
-                            self.log(f'-去完成: {task_name}')
-                            self.do_task(task_id, task_type='day', app_type='cloud_app')
-                elif app_type == 'email_app':
-                    if task_type == "month":
-                        self.log('\n📆 139邮箱每月任务')
-                        for month in tasks:
-                            task_id = month.get('id')
-                            task_name = re.sub(r'<[^>]+>', '', month.get('name', ''))
-                            task_status = month.get('state', '')
-                            if task_id in [1004, 1005, 1015, 1020]:
-                                continue
-                            if task_status == 'FINISH':
-                                print(f'-已完成: {task_name}')
-                                continue
-                            self.log(f'-去完成: {task_name}')
-                            self.do_task(task_id, task_type='month', app_type='email_app')
-                            time.sleep(2)
-        except Exception as e:
-            self.log(f'获取任务列表错误:{e}')
+    def do_note_task(self):
+        """笔记任务 (107): 刷新笔记token -> 获取默认笔记本 -> 创建笔记"""
+        self.refresh_notetoken()
+        if not self.note_auth or not self.note_token:
+            self.log('笔记任务失败: 笔记token获取失败')
+            return False
+        note_url = 'http://mnote.caiyun.feixin.10086.cn/noteServer/api/syncNotebookV3.do'
+        headers = {
+            'X-Tingyun-Id': 'p35OnrDoP8k;c=2;r=1122634489;u=43ee994e8c3a6057970124db00b2442c::8B3D3F05462B6E4C',
+            'Charset': 'UTF-8',
+            'Connection': 'Keep-Alive',
+            'User-Agent': 'mobile',
+            'APP_CP': 'android',
+            'CP_VERSION': '3.2.0',
+            'x-huawei-channelsrc': '10001400',
+            'APP_NUMBER': self.account,
+            'APP_AUTH': self.note_auth,
+            'NOTE_TOKEN': self.note_token,
+            'Host': 'mnote.caiyun.feixin.10086.cn',
+            'Content-Type': 'application/json; charset=UTF-8',
+            'Accept': '*/*'
+        }
+        payload = {
+            "addNotebooks": [],
+            "delNotebooks": [],
+            "notebookRefs": [],
+            "updateNotebooks": []
+        }
+        return_data = self.send_request(url=note_url, headers=headers, data=payload, method='POST').json()
+        if return_data is None:
+            self.log('笔记任务失败: 出错了')
+            return False
+        self.notebook_id = return_data['notebooks'][0]['notebookId']
+        self.create_note(headers)
+        return True
     @catch_errors
     def do_task(self, task_id, task_type, app_type):
         self.sleep()
@@ -1558,56 +1696,21 @@ class YP:
         else:
             task_url = f'https://caiyun.feixin.10086.cn/market/signin/task/click?key=task&id={task_id}'
             self.send_request(task_url, headers=self.jwtHeaders, cookies=self.cookies)
-        if app_type == 'cloud_app':
-            if task_type == 'day':
-                if task_id == 106:
-                    self.log('-开始上传文件，默认0kb')
-                    self.updata_file()
-                elif task_id == 107:
-                    self.refresh_notetoken()
-                    print('-获取默认笔记id')
-                    note_url = 'http://mnote.caiyun.feixin.10086.cn/noteServer/api/syncNotebookV3.do'
-                    headers = {
-                        'X-Tingyun-Id': 'p35OnrDoP8k;c=2;r=1122634489;u=43ee994e8c3a6057970124db00b2442c::8B3D3F05462B6E4C',
-                        'Charset': 'UTF-8',
-                        'Connection': 'Keep-Alive',
-                        'User-Agent': 'mobile',
-                        'APP_CP': 'android',
-                        'CP_VERSION': '3.2.0',
-                        'x-huawei-channelsrc': '10001400',
-                        'APP_NUMBER': self.account,
-                        'APP_AUTH': self.note_auth,
-                        'NOTE_TOKEN': self.note_token,
-                        'Host': 'mnote.caiyun.feixin.10086.cn',
-                        'Content-Type': 'application/json; charset=UTF-8',
-                        'Accept': '*/*'
-                    }
-                    payload = {
-                        "addNotebooks": [],
-                        "delNotebooks": [],
-                        "notebookRefs": [],
-                        "updateNotebooks": []
-                    }
-                    return_data = self.send_request(url=note_url, headers=headers, data=payload,
-                                                    method='POST').json()
-                    if return_data is None:
-                        return print('出错了')
-                    self.notebook_id = return_data['notebooks'][0]['notebookId']
-                    print('开始创建笔记')
-                    self.create_note(headers)
-            elif task_type == 'month':
-                pass
-        elif app_type == 'email_app':
-            if task_type == 'month':
-                pass
+        if app_type == 'cloud_app' and task_type == 'day':
+            if task_id == 106:
+                self.log('-开始上传文件，默认0kb')
+                self.updata_file()
+            elif task_id == 107:
+                self.do_note_task()
     @catch_errors
     def updata_file(self):
         upload_info = self.create_cloud_file('auto_upload_')
         if not upload_info:
             self.log('-上传失败: 接口无响应')
-            return
+            return False
         self.log(f"-上传文件成功，文件名: {upload_info.get('fileName', '')}")
         self.cleanup_uploaded_files(upload_info)
+        return True
     def create_note(self, headers):
         note_id = self.get_note_id(32)
         createtime = str(int(round(time.time() * 1000)))
@@ -1679,24 +1782,9 @@ class YP:
         if not return_data['result'].get('todaySignIn'):
             return self.log('❌签到失败,可能未绑定公众号')
         return self.log('✅公众号签到成功')
-    def shake(self):
-        url = "https://caiyun.feixin.10086.cn:7071/market/shake-server/shake/shakeIt?flag=1"
-        successful_shakes = 0
-        try:
-            for _ in range(self.click_num):
-                return_data = self.send_request(url=url, cookies=self.cookies, headers=self.jwtHeaders,
-                                                method='POST').json()
-                time.sleep(1)
-                shake_prize_config = return_data["result"].get("shakePrizeconfig")
-                if shake_prize_config:
-                    self.log(f"🎉摇一摇获得: {shake_prize_config['name']}")
-                    successful_shakes += 1
-        except Exception as e:
-            print(f'错误信息: {e}')
-        if successful_shakes == 0:
-            print(f'❌未摇中 x {self.click_num}')
     @catch_errors
     def surplus_num(self):
+        """公众号抽奖 (drawInfo/draw)"""
         self.sleep()
         draw_info_url = 'https://caiyun.feixin.10086.cn/market/playoffic/drawInfo'
         draw_url = "https://caiyun.feixin.10086.cn/market/playoffic/draw"
@@ -1718,42 +1806,9 @@ class YP:
         else:
             self.log(f"抽奖查询失败: {draw_info_data.get('msg')}")
     @catch_errors
-    def do_fruit_task(self, task_name, task_id, water_num):
-        self.log(f'-去完成: {task_name}')
-        do_task_url = f'{self.fruit_url}task/doTask.do?taskId={task_id}'
-        do_task_data = self.send_request(do_task_url, headers=self.treeHeaders).json()
-        if do_task_data.get('success'):
-            get_water_url = f'{self.fruit_url}task/givenWater.do?taskId={task_id}'
-            get_water_data = self.send_request(get_water_url, headers=self.treeHeaders).json()
-            if get_water_data.get('success'):
-                self.log(f'-已完成任务获得水滴: {water_num}')
-            else:
-                self.log(f'❌领取失败: {get_water_data.get("msg", "")}')
-        else:
-            self.log(f'❌参与任务失败: {do_task_data.get("msg", "")}')
-    @catch_errors
-    def cloud_game(self):
-        game_info_url = 'https://caiyun.feixin.10086.cn/market/signin/hecheng1T/info?op=info'
-        bigin_url = 'https://caiyun.feixin.10086.cn/market/signin/hecheng1T/beinvite'
-        end_url = 'https://caiyun.feixin.10086.cn/market/signin/hecheng1T/finish?flag=true'
-        game_info_data = self.send_request(game_info_url, headers=self.jwtHeaders, cookies=self.cookies).json()
-        if game_info_data and game_info_data.get('code', -1) == 0:
-            currnum = game_info_data.get('result', {}).get('info', {}).get('curr', 0)
-            count = game_info_data.get('result', {}).get('history', {}).get('0', {}).get('count', '')
-            rank = game_info_data.get('result', {}).get('history', {}).get('0', {}).get('rank', '')
-            self.log(f'今日剩余游戏次数: {currnum} 合成次数: {count}')
-            for _ in range(currnum):
-                self.send_request(bigin_url, headers=self.jwtHeaders, cookies=self.cookies).json()
-                print('-开始游戏,等待10-15秒完成游戏')
-                time.sleep(random.randint(10, 15))
-                end_data = self.send_request(end_url, headers=self.jwtHeaders, cookies=self.cookies).json()
-                if end_data and end_data.get('code', -1) == 0:
-                    self.log('游戏成功')
-        else:
-            print("-获取游戏信息失败")
-    @catch_errors
     def receive(self):
-        prize_url = f"https://caiyun.feixin.10086.cn/market/prizeApi/checkPrize/getUserPrizeLogPage?currPage=1&pageSize=15&_={self.timestamp}"
+        """按 infoV3.receiveList 逐项领取 (对齐 Go receiveV3: cloudId=recordId, isDeviceId头)"""
+        prize_url = f"https://caiyun.feixin.10086.cn/market/prizeApi/checkPrize/getUserPrizeLogPageV2?currPage=1&pageSize=15&_={self.timestamp}"
         info_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/infoV3',
                                              params={'client': 'app'})
         if not info_data:
@@ -1762,50 +1817,46 @@ class YP:
         if info_data.get('code') != 0:
             self.log(f"查询云朵失败: {info_data.get('msg', '未知错误')}")
             return
-        info_result = info_data.get('result', {})
+        info_result = info_data.get('result', {}) or {}
         pending_amount = info_result.get('toReceive', 0)
         total_amount = info_result.get('total', '')
-        if pending_amount:
-            self.prepare_signin_center_session(for_receive=True)
-            receive_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/receiveV3',
-                                                    params={'client': 'app'},
-                                                    headers=self.build_receive_headers(),
-                                                    retries=2)
-            if not receive_data or receive_data.get('code') != 0:
-                self.log('V3领取失败，尝试V2')
-                receive_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/receiveV2',
-                                                        params={'client': 'app'},
-                                                        headers=self.build_receive_headers(),
-                                                        retries=2)
-            if not receive_data:
-                self.log('领取云朵失败: 接口无响应')
-                self.log(f'-当前待领取:{pending_amount}云朵')
-            elif receive_data.get('code') == 0:
-                receive_result = receive_data.get('result', {})
-                self.log(f'-领取云朵:{receive_result.get("receive", pending_amount)}云朵')
-                total_amount = receive_result.get('total', total_amount)
+        received_amount = 0
+        device_id = self.get_market_device_id()
+        for item in info_result.get('receiveList') or []:
+            reward_id = item.get('recordId') or item.get('rewardId') or item.get('id')
+            cloud_type = item.get('cloudType', 0)
+            if not reward_id or cloud_type != 0:
+                continue
+            headers = self.build_receive_headers()
+            headers['isDeviceId'] = 'true'
+            headers['Content-Type'] = 'application/json;charset=UTF-8'
+            ack = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/receiveV3',
+                                           headers=headers, json_body=True, method='POST',
+                                           data={'client': 'app', 'cloudId': reward_id,
+                                                 'cloudType': cloud_type,
+                                                 'deviceId': device_id or ''},
+                                           retries=1)
+            if ack and ack.get('code') == 0:
+                ack_result = ack.get('result') or {}
+                received_amount += int(ack_result.get('receive', 0) or 0)
+                total_amount = ack_result.get('total', total_amount)
             else:
-                latest_info_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/infoV3',
-                                                            params={'client': 'app'})
-                latest_result = latest_info_data.get('result', {}) if latest_info_data and latest_info_data.get('code') == 0 else {}
-                latest_pending = latest_result.get('toReceive', pending_amount)
-                latest_total = latest_result.get('total', total_amount)
-                pending_delta = pending_amount - latest_pending if isinstance(pending_amount, int) and isinstance(latest_pending, int) else 0
-                total_delta = latest_total - total_amount if isinstance(total_amount, int) and isinstance(latest_total, int) else 0
-                claimed_amount = total_delta or pending_delta or (pending_amount if latest_pending == 0 else 0)
-                if claimed_amount > 0:
-                    self.log(f'-领取云朵:{claimed_amount}云朵')
-                    total_amount = latest_total
-                else:
-                    self.log(f"领取云朵失败: {receive_data.get('msg', '未知错误')}")
-                    self.log(f'-当前待领取:{pending_amount}云朵')
+                msg = ack.get('msg', '未知错误') if ack else '接口无响应'
+                self.log(f'-领取云朵失败: {msg}')
+            time.sleep(0.5)
+        if received_amount:
+            self.log(f'-领取云朵:{received_amount}云朵')
+        elif pending_amount:
+            self.log(f'-当前待领取:{pending_amount}云朵')
         else:
             self.log('-当前待领取:0云朵')
         self.sleep()
         prize_data = self.request_json(prize_url, headers=self.jwtHeaders, cookies=self.cookies) or {}
-        result = prize_data.get('result', {}).get('result') or []
+        result = prize_data.get('result', {})
+        if isinstance(result, dict):
+            result = result.get('result') or result.get('list') or []
         rewards = ''
-        for value in result:
+        for value in result or []:
             prizeName = value.get('prizeName')
             flag = value.get('flag')
             if flag == 1:
@@ -1884,268 +1935,6 @@ class YP:
             self.log(f'- 通知已开启天数: {onDuaration}, 满{total}天可领取奖励')
         else:
             self.log('- 通知权限未开启')
-    def login_red_packet(self):
-        token = self.query_spec_token(RED_PACKET_SOURCE_ID)
-        if not token:
-            return False
-        login_url = f'{RED_PACKET_BASE_URL}/ticket/login'
-        login_headers = {
-            'Content-Type': 'application/json',
-            'User-Agent': market_ua,
-            'Accept': '*/*',
-            'Host': 'cpactiv.buy.139.com',
-            'Referer': RED_PACKET_PAGE_URL,
-            'Origin': 'https://cpactiv.buy.139.com',
-        }
-        try:
-            resp = self.session.post(login_url, headers=login_headers,
-                                     json={'token': token, 'sourceId': RED_PACKET_SOURCE_ID},
-                                     timeout=15)
-            if resp.status_code == 200:
-                login_data = resp.json()
-            else:
-                self.log(f'红包派对登录失败: HTTP {resp.status_code}，请求已记录')
-                return False
-        except Exception as e:
-            self.log(f'红包派对登录异常: {e}')
-            return False
-        if not login_data:
-            self.log('红包派对登录失败: 接口无响应')
-            return False
-        if login_data.get('code') != 0:
-            self.log(f"红包派对登录失败: {login_data.get('msg', '未知错误')}")
-            return False
-        login_result = login_data.get('result') or {}
-        self.red_packet_token = login_result.get('token') or ''
-        self.red_packet_mobile = login_result.get('mobile') or self.account
-        header = login_data.get('header') or {}
-        if str(header.get('status')) == '200':
-            self.market_source_id = RED_PACKET_SOURCE_ID
-            self.build_market_context(login_result.get('jwtToken') or '')
-            self.save_red_packet_token()
-            return True
-        self.log(f"红包派对登录失败: {header.get('respMsg', '未知错误')}")
-        return False
-    def load_red_packet_token(self):
-        stored = self.get_storage_record()
-        self.red_packet_token = stored.get('redPacketToken', '')
-        self.red_packet_mobile = stored.get('redPacketMobile', '')
-        return bool(self.red_packet_token)
-    def save_red_packet_token(self):
-        cache = load_js_cache()
-        entry = cache.setdefault('accounts', {}).setdefault(self.account, {})
-        entry['redPacketToken'] = self.red_packet_token
-        entry['redPacketMobile'] = self.red_packet_mobile
-        save_js_cache(cache)
-    def sign_red_packet(self):
-        if not self.red_packet_mobile:
-            no = self.account
-        else:
-            no = self.red_packet_mobile
-        sign_str = f'{RED_PACKET_SIGN_KEY}mobile{no}'
-        sign = hashlib.md5(sign_str.encode()).hexdigest()
-        data = self.request_market_json(f'{RED_PACKET_BASE_URL}/sign/signBySourceId',
-                                        json_body=True, method='POST', data={
-                'mobile': no,
-                'sign': sign,
-                'sourceId': RED_PACKET_SOURCE_ID,
-                'version': RED_PACKET_VERSION,
-                'channelSrc': RED_PACKET_CHANNEL_SRC,
-            })
-        if not data:
-            return False
-        if data.get('code') == 0:
-            self.log('红包签到成功')
-            return True
-        self.log(f"红包签到失败: {data.get('msg', '未知错误')}")
-        return True
-    def get_red_packet_task_list(self):
-        token = self.red_packet_token
-        if not token:
-            return None
-        return self.request_market_json(f'{RED_PACKET_BASE_URL}/taskCenter/task',
-                                        json_body=True, method='POST', data={
-                'appId': RED_PACKET_APP_ID,
-                'sourceId': RED_PACKET_SOURCE_ID,
-                'token': token,
-            })
-    def log_red_packet_balance(self):
-        token = self.red_packet_token
-        if not token:
-            return
-        balance_data = self.request_market_json(f'{RED_PACKET_BASE_URL}/taskCenter/balance',
-                                                json_body=True, method='POST', data={
-                'appId': RED_PACKET_APP_ID,
-                'sourceId': RED_PACKET_SOURCE_ID,
-                'token': token,
-            })
-        if not balance_data:
-            return
-        header = balance_data.get('header') or {}
-        if str(header.get('status')) != '200':
-            return
-        result = balance_data.get('data') or {}
-        amount = result.get('amount', 0)
-        self.log(f'-余额: {amount}')
-    def handle_red_packet_sign(self, task_list):
-        sign_task = task_list.get('SIGN') or {}
-        if not sign_task:
-            return
-        for task in sign_task:
-            if task.get('state') == 3:
-                continue
-            self.sign_red_packet()
-            return
-    def handle_red_packet_task(self, task):
-        task_name = task.get('taskName', '')
-        task_code = task.get('taskCode', '')
-        state = task.get('state', 0)
-        if state == 3:
-            self.log(f'-已完成: {task_name}')
-            return
-        if task_code in RED_PACKET_MANUAL_TASKS:
-            self.log(f'-{RED_PACKET_MANUAL_TASKS[task_code]}: {task_name}')
-            return
-        if state == 0:
-            click_data = self.request_market_json(f'{RED_PACKET_BASE_URL}/taskCenter/click',
-                                                  json_body=True, method='POST', data={
-                    'appId': RED_PACKET_APP_ID,
-                    'sourceId': RED_PACKET_SOURCE_ID,
-                    'token': self.red_packet_token,
-                    'taskCode': task_code,
-                })
-            if not click_data:
-                self.log(f'-操作失败: {task_name}')
-                return
-            header = click_data.get('header') or {}
-            if str(header.get('status')) != '200':
-                self.log(f"-操作失败: {task_name} {header.get('respMsg', '未知错误')}")
-                return
-            done = click_data.get('data') or {}
-            if done.get('state') == 2:
-                self.log(f'-进行中: {task_name}')
-                return
-            return
-        if state == 1:
-            self.log(f'-进行中: {task_name}')
-            return
-        if state == 2:
-            if task_code in RED_PACKET_BROWSE_TASKS:
-                self.log(f'-浏览任务: {task_name} (需跳转活动页)')
-                return
-            if task_code in RED_PACKET_DIRECT_TASKS:
-                complete_data = self.request_market_json(f'{RED_PACKET_BASE_URL}/taskCenter/complete',
-                                                         json_body=True, method='POST', data={
-                        'appId': RED_PACKET_APP_ID,
-                        'sourceId': RED_PACKET_SOURCE_ID,
-                        'token': self.red_packet_token,
-                        'taskCode': task_code,
-                    })
-                if not complete_data:
-                    self.log(f'-完成失败: {task_name}')
-                    return
-                header = complete_data.get('header') or {}
-                if str(header.get('status')) == '200':
-                    self.log(f'-已完成: {task_name}')
-                else:
-                    self.log(f"-完成失败: {task_name} {header.get('respMsg', '未知错误')}")
-                return
-            if task_code.startswith('ANSWER_'):
-                self.do_red_packet_question(task, task_code)
-                return
-            self.log(f'-需手动完成: {task_name}')
-            return
-    def get_red_packet_question(self, task):
-        token = self.red_packet_token
-        if not token:
-            return None
-        data = self.request_market_json(f'{RED_PACKET_BASE_URL}/taskCenter/question',
-                                        json_body=True, method='POST', data={
-                'appId': RED_PACKET_APP_ID,
-                'sourceId': RED_PACKET_SOURCE_ID,
-                'token': token,
-                'taskCode': task.get('taskCode', ''),
-            })
-        if not data:
-            return None
-        header = data.get('header') or {}
-        if str(header.get('status')) != '200':
-            return None
-        return data.get('data') or {}
-    def do_red_packet_question(self, task, task_code):
-        token = self.red_packet_token
-        if not token:
-            return
-        task_name = task.get('taskName', '')
-        question = self.get_red_packet_question(task)
-        if not question:
-            self.log(f'-获取题目失败: {task_name}')
-            return
-        question_text = question.get('question') or question.get('questionText', '')
-        options = question.get('options') or question.get('questionOptionList') or []
-        answer = RED_PACKET_KNOWN_ANSWERS.get(question_text, '')
-        if not answer and options:
-            answer = options[0].get('optionDesc') or options[0].get('name', '')
-            self.log(f'-未知题目: {question_text}')
-        if not answer:
-            self.log(f'-无答案: {task_name}')
-            return
-        option_id = ''
-        for opt in options:
-            desc = opt.get('optionDesc') or opt.get('name', '')
-            if desc == answer:
-                option_id = opt.get('id') or opt.get('optionId', '')
-                break
-        if not option_id:
-            self.log(f'-找不到选项: {task_name}')
-            return
-        answer_data = self.request_market_json(f'{RED_PACKET_BASE_URL}/taskCenter/answer',
-                                               json_body=True, method='POST', data={
-                'appId': RED_PACKET_APP_ID,
-                'sourceId': RED_PACKET_SOURCE_ID,
-                'token': token,
-                'taskCode': task_code,
-                'optionId': option_id,
-            })
-        if not answer_data:
-            self.log(f'-答题失败: {task_name}')
-            return
-        header = answer_data.get('header') or {}
-        if str(header.get('status')) == '200':
-            self.log(f'-答题成功: {task_name}')
-        else:
-            self.log(f"-答题失败: {task_name} {header.get('respMsg', '未知错误')}")
-    @staticmethod
-    def red_packet_task_groups():
-        return [
-            ('SIGN', '签到'),
-            ('NOVICE', '新手任务'),
-            ('DAILY', '每日任务'),
-            ('MONTHLY', '每月任务'),
-        ]
-    def red_envelope_party(self):
-        self.log(f'\n🧧 红包派对任务')
-        if not self.login_red_packet():
-            return
-        data = self.get_red_packet_task_list()
-        if not data:
-            self.log('获取红包派对任务失败: 接口无响应')
-            return
-        header = data.get('header') or {}
-        if str(header.get('status')) != '200':
-            self.log(f"获取红包派对任务失败: {header.get('errMsg') or header.get('respMsg') or '未知错误'}")
-            return
-        task_list = data.get('data') or {}
-        self.log_red_packet_balance()
-        self.handle_red_packet_sign(task_list)
-        for group, title in self.red_packet_task_groups():
-            tasks = task_list.get(group) or []
-            if not tasks:
-                continue
-            self.log(title)
-            for task in tasks:
-                self.handle_red_packet_task(task)
-        self.log_red_packet_balance()
 
 if __name__ == "__main__":
     env_name = 'yunpan'

@@ -12,15 +12,21 @@ jobs:
       run:
         working-directory: ydqd
     steps:
-      - uses: actions/checkout@v4
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
       - name: 设置 Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
       - name: 安装依赖
         run: pip install -r requirements.txt
+
       - name: 执行签到
         env:
           yunpan: ${{ secrets.YUNPAN_TOKEN }}
           yunpan_device_id: ${{ secrets.YUNPAN_DEVICE_ID }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python yunpan.py

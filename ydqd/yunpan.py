@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# 移动云盘自动签到 v6.0.0
-# 依据 caiyun-master(Go版, 基线 mCloud 13.2.2 / 2026-09-30 协议) 升级:
-#   +) taskListV3 / doTaskPost登记 / receiveTask领奖 / 逐项receiveV3领云朵 / getUserPrizeLogPageV2
-#   +) 新任务ID行为映射(上传/照片/AI相机), 多轮进度推进
-#   -) 移除已失效: 摇一摇 shake、红包派对 red_envelope_party、合成1T cloud_game、果园 do_fruit_task、戳一戳click
 
 import base64
 import hashlib
@@ -17,7 +12,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from os import path
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, quote
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
 import requests
@@ -28,7 +23,12 @@ except ImportError:
     AES = None
     pad = None
 
-SCRIPT_VERSION = '6.0.0'
+os.environ.setdefault('TZ', 'Asia/Shanghai')
+try:
+    time.tzset()
+except AttributeError:
+    pass
+
 DEVICE_ID_STORAGE_FILENAME = 'yunpan_device_ids.json'
 JS_CACHE_DIR = 'data'
 JS_CACHE_FILE = 'yunpan_token_cache.json'
@@ -168,17 +168,10 @@ FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000
 REFRESH_TOKEN_AES_KEY = 'c7lXOigXahPnTViq'
 AI_CAMERA_SAMPLE_BASE64 = "data:image/jpg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAkGBxAQEBUQEBAVFRUVFRUVFRUVFRUVFRUVFRUWFhUVFRUYHSggGBolHRUVITEhJSkrLi4uFx8zODMsNygtLisBCgoKDg0OGhAQGi0lHyUtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLf/AABEIAAEAAQMBIgACEQEDEQH/xAAXAAEBAQEAAAAAAAAAAAAAAAAAAQID/8QAFhEBAQEAAAAAAAAAAAAAAAAAABEh/9oADAMBAAIQAxAAAAHhAH//xAAZEAEBAQEBAQAAAAAAAAAAAAABEQIhMUH/2gAIAQEAAT8A2M4Kxqf/xAAWEQEBAQAAAAAAAAAAAAAAAAAAESH/2gAIAQIBAT8Ap//EABYRAQEBAAAAAAAAAAAAAAAAAAABEf/aAAgBAwEBPwCf/9k="
 
-# V3 任务行为映射 (对齐 Go 版 tasklist.go, 基线 13.2.2)
-# 真实云盘文件动作驱动(上传): 106/110/113 及签到中心上传类
 V3_UPLOAD_TASK_IDS = {106, 110, 113, 319, 409, 431, 604, 1003, 1005, 1017, 1055}
-# 照片上传类
 V3_PHOTO_TASK_IDS = {614, 615, 1080, 1081}
-# AI相机/拍照问AI
 V3_AICAMERA_TASK_IDS = {585, 616, 618, 1082, 1084}
-# 上述任务需要"真实行为 + doTaskPost登记"最多推进4轮
 V3_MULTIRound_TASK_IDS = V3_UPLOAD_TASK_IDS | V3_PHOTO_TASK_IDS | V3_AICAMERA_TASK_IDS | {609, 617, 1083, 522}
-# 依赖外部条件/需手动或独立处理的任务
-V3_MANUAL_TASK_IDS = {105, 120, 406, 478, 547, 609, 617, 1083}
 
 err_accounts = ''
 all_logs = ''
@@ -384,9 +377,6 @@ def get_device_id(account):
     data = load_device_id_storage()
     account_data = data.get(account, {})
     return account_data.get('deviceId', '')
-def print_startup_info(account_count):
-    print(f"移动云盘自动签到 v{SCRIPT_VERSION}")
-    print(f"移动云盘共获取到{account_count}个账号")
 def print_device_id_notice():
     if get_env_device_id():
         print("已检测到 yunpan_device_id，将优先使用环境变量 deviceId")
@@ -401,20 +391,51 @@ def print_device_id_notice():
 def print_storage_path_notice():
     print(f"缓存文件目录: {get_storage_base_dir()}")
     print(f"deviceId缓存文件: {get_device_id_storage_path()}")
-    print(f"Token缓存文件（与JS共用）: {get_js_cache_path()}")
-def load_send():
-    cur_path = path.abspath(path.dirname(__file__))
-    notify_file = cur_path + "/notify.py"
-    if path.exists(notify_file):
+    print(f"Token缓存文件: {get_js_cache_path()}")
+def send_notification(title, content):
+    sent = False
+    bark = (os.getenv('BARK_URL') or os.getenv('BARK_PUSH') or '').strip()
+    if bark:
         try:
-            from notify import send
-            print("加载通知服务成功！")
-            return send
-        except ImportError:
-            print("加载通知服务失败~")
-    else:
-        print("加载通知服务失败~")
-    return False
+            requests.get(f"{bark.rstrip('/')}/{quote(title)}/{quote(content)}", timeout=10)
+            sent = True
+        except Exception as e:
+            print(f'Bark通知失败: {e}')
+    sendkey = (os.getenv('SENDKEY') or '').strip()
+    if sendkey:
+        try:
+            requests.post(f'https://sctapi.ftqq.com/{sendkey}.send',
+                          data={'title': title, 'desp': content}, timeout=10)
+            sent = True
+        except Exception as e:
+            print(f'Server酱通知失败: {e}')
+    pp = (os.getenv('PUSHPLUS_TOKEN') or '').strip()
+    if pp:
+        try:
+            requests.post('http://www.pushplus.plus/send',
+                          json={'token': pp, 'title': title, 'content': content, 'template': 'txt'},
+                          timeout=10)
+            sent = True
+        except Exception as e:
+            print(f'pushplus通知失败: {e}')
+    tg_token = (os.getenv('TG_BOT_TOKEN') or '').strip()
+    tg_chat = (os.getenv('TG_CHAT_ID') or '').strip()
+    if tg_token and tg_chat:
+        try:
+            requests.post(f'https://api.telegram.org/bot{tg_token}/sendMessage',
+                          json={'chat_id': tg_chat, 'text': f'{title}\n\n{content}'}, timeout=10)
+            sent = True
+        except Exception as e:
+            print(f'Telegram通知失败: {e}')
+    hook = (os.getenv('WEBHOOK_URL') or '').strip()
+    if hook:
+        try:
+            requests.post(hook, json={'title': title, 'content': content}, timeout=10)
+            sent = True
+        except Exception as e:
+            print(f'Webhook通知失败: {e}')
+    if not sent:
+        print('未配置通知渠道(BARK_URL/SENDKEY/PUSHPLUS_TOKEN/TG_BOT_TOKEN/WEBHOOK_URL)，跳过推送')
 
 class YP:
     def __init__(self, cookie):
@@ -423,7 +444,6 @@ class YP:
             self.note_token = None
             self.note_auth = None
             self.auth_token = None
-            self.draw = 1
             self.client_version = '13.2.2'
             self.market_base_url = 'https://m.mcloud.139.com'
             self.market_source_id = '1097'
@@ -649,13 +669,9 @@ class YP:
             self.refresh_authorization_token()
             self.signin_status()
             self.get_tasklist(url='sign_in_3', app_type='cloud_app')
-            self.log(f'\n📰 公众号任务')
-            self.wxsign()
-            self.surplus_num()
             self.log(f'\n🔥 热门任务')
             self.backup_cloud()
             self.complete_notice_task()
-            self.log(f'\n📧 139邮箱任务')
             self.get_tasklist(url='newsign_139mail', app_type='email_app')
             self.receive()
             self.sync_token_storage()
@@ -827,9 +843,7 @@ class YP:
         return True
     def click_task(self, task_id, key='task'):
         return self.request_market_json(f'{self.market_base_url}/ycloud/signin/task/click?key={key}&id={task_id}')
-    # ---------- V3 任务中心协议 (对齐 Go 13.2.2) ----------
     def get_task_list_v3(self, market_name='sign_in_3'):
-        """taskListV3: 扁平任务数组, 替代 V2 分组结构; 失败返回 None 走 V2 回退"""
         if market_name not in ('sign_in_3', 'newsign_139mail'):
             return None
         self.prepare_signin_center_session(False)
@@ -851,7 +865,6 @@ class YP:
                 return task
         return None
     def do_task_post(self, task_id=None):
-        """doTaskPost: 新版任务中心 deviceId 注册 / 真实行为后任务登记"""
         device_id = self.get_market_device_id()
         if not device_id:
             self.load_or_create_market_device_profile()
@@ -871,7 +884,6 @@ class YP:
         elif resp.get('code') != 0:
             self.log(f"任务中心deviceId登记异常: {resp.get('msg', '未知错误')}")
     def receive_task_reward(self, task_id):
-        """receiveTask: 领取已完成(status=1)未领取的任务奖励"""
         return self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/receiveTask',
                                         params={'taskId': task_id})
     def receive_completed_task_rewards_v3(self, market_name, tasks=None):
@@ -880,7 +892,6 @@ class YP:
         for task in tasks:
             if not isinstance(task, dict):
                 continue
-            # V3: state 非空表示按状态推进; status==1 表示完成待领取
             if task.get('state') or task.get('status') != 1:
                 continue
             task_id = task.get('id')
@@ -893,7 +904,6 @@ class YP:
                 self.log(f'-领取任务奖励失败: {task_name}({task_id}) {msg}')
             time.sleep(0.3)
     def run_task_list_v3(self, market_name, title):
-        """V3 任务主流程: 先领奖 -> 执行 -> 再领奖; 返回 False 表示需回退 V2"""
         tasks = self.get_task_list_v3(market_name)
         if tasks is None:
             return False
@@ -933,7 +943,6 @@ class YP:
             else:
                 self.log(f"-需手动完成: {task_name} {click_data.get('msg', '未知错误')}")
             return
-        # 特殊任务: 真实行为 + doTaskPost 登记, 多任务最多推进4轮
         action = None
         max_rounds = 1
         if task_id in V3_UPLOAD_TASK_IDS:
@@ -1081,7 +1090,6 @@ class YP:
             "fileName": data.get("fileName", file_name),
         }
     def upload_photo_file(self):
-        """照片类上传任务 (614/615/1080/1081)"""
         upload_info = self.create_cloud_file('auto_photo_', '.jpg')
         if not upload_info:
             self.log('-照片上传失败: 接口无响应')
@@ -1387,7 +1395,6 @@ class YP:
             current_process = refreshed_process
         self.log(f'-月上传任务进度: {current_process}/{target_count}')
         return False
-    # ---------- 任务列表入口: V3 优先, V2 回退 ----------
     def get_tasklist(self, url, app_type):
         if url in ('sign_in_3', 'newsign_139mail'):
             title = '\n📋 云朵中心任务' if app_type == 'cloud_app' else '\n📧 139邮箱任务'
@@ -1484,14 +1491,10 @@ class YP:
                 msg = click_data.get('msg', '未知错误') if click_data else '接口无响应'
                 self.log(f'-任务登记失败: {task_name} {msg}')
                 return
-            if task_id == 585 and self.complete_ai_camera_task():
-                self.log(f'-已完成: {task_name}')
-                return
             self.log(f'-已登记任务: {task_name}')
             return
         self.log(f'-需手动完成: {task_name}{self.get_task_progress(task)}')
     def get_tasklist_v2_fallback(self, url, app_type):
-        """旧版 V2/老接口回退 (newsign_139mail 等非签到中心渠道)"""
         req_url = f'https://caiyun.feixin.10086.cn/market/signin/task/taskList?marketname={url}'
         return_data = self.send_request(req_url, headers=self.jwtHeaders, cookies=self.cookies).json()
         self.sleep()
@@ -1654,7 +1657,6 @@ class YP:
         self.note_token = response.headers.get('NOTE_TOKEN')
         self.note_auth = response.headers.get('APP_AUTH')
     def do_note_task(self):
-        """笔记任务 (107): 刷新笔记token -> 获取默认笔记本 -> 创建笔记"""
         self.refresh_notetoken()
         if not self.note_auth or not self.note_token:
             self.log('笔记任务失败: 笔记token获取失败')
@@ -1773,41 +1775,7 @@ class YP:
         note_id = ''.join(random.choice(characters) for _ in range(length))
         return note_id
     @catch_errors
-    def wxsign(self):
-        self.sleep()
-        url = 'https://caiyun.feixin.10086.cn/market/playoffic/followSignInfo?isWx=true'
-        return_data = self.send_request(url, headers=self.jwtHeaders, cookies=self.cookies).json()
-        if return_data['msg'] != 'success':
-            return self.log(return_data['msg'])
-        if not return_data['result'].get('todaySignIn'):
-            return self.log('❌签到失败,可能未绑定公众号')
-        return self.log('✅公众号签到成功')
-    @catch_errors
-    def surplus_num(self):
-        """公众号抽奖 (drawInfo/draw)"""
-        self.sleep()
-        draw_info_url = 'https://caiyun.feixin.10086.cn/market/playoffic/drawInfo'
-        draw_url = "https://caiyun.feixin.10086.cn/market/playoffic/draw"
-        draw_info_data = self.send_request(draw_info_url, headers=self.jwtHeaders).json()
-        if draw_info_data.get('msg') == 'success':
-            remain_num = draw_info_data['result'].get('surplusNumber', 0)
-            self.log(f'剩余抽奖次数{remain_num}')
-            if remain_num > 50 - self.draw:
-                for _ in range(self.draw):
-                    self.sleep()
-                    draw_data = self.send_request(url=draw_url, headers=self.jwtHeaders).json()
-                    if draw_data.get("code") == 0:
-                        prize_name = draw_data["result"].get("prizeName", "")
-                        self.log("✅抽奖成功，获得:" + prize_name)
-                    else:
-                        print("❌抽奖失败")
-            else:
-                pass
-        else:
-            self.log(f"抽奖查询失败: {draw_info_data.get('msg')}")
-    @catch_errors
     def receive(self):
-        """按 infoV3.receiveList 逐项领取 (对齐 Go receiveV3: cloudId=recordId, isDeviceId头)"""
         prize_url = f"https://caiyun.feixin.10086.cn/market/prizeApi/checkPrize/getUserPrizeLogPageV2?currPage=1&pageSize=15&_={self.timestamp}"
         info_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/infoV3',
                                              params={'client': 'app'})
@@ -1931,7 +1899,6 @@ class YP:
                 reward2_data = self.send_request(reward_url, headers=self.jwtHeaders, data={"type": 2},
                                                  method="POST").json()
                 self.log(reward2_data.get('result', {}).get('description', ''))
-            progress = f'{onDuaration}/{total}天'
             self.log(f'- 通知已开启天数: {onDuaration}, 满{total}天可领取奖励')
         else:
             self.log('- 通知权限未开启')
@@ -1943,7 +1910,7 @@ if __name__ == "__main__":
         print(f'⛔️未获取到ck变量：请检查变量 {env_name} 是否填写')
         exit(0)
     cookies = re.split(r'[&]', token)
-    print_startup_info(len(cookies))
+    print(f"共获取到 {len(cookies)} 个账号")
     print_device_id_notice()
     print_storage_path_notice()
     for i, account_info in enumerate(cookies, start=1):
@@ -1968,6 +1935,4 @@ if __name__ == "__main__":
         print(f"☁️ 云朵汇总:\n{user_amount}")
     msg = msg.replace('-', ' ').replace('.', ' ').replace('!', '！').replace('(', '（').replace(')', '）')
     msg = msg.replace('_', ' ').replace('=', ' ').replace('~', ' ').replace('{', ' ').replace('}', ' ').replace('|', ' ')
-    send = load_send()
-    if send:
-        send('中国移动云盘任务信息', msg)
+    send_notification('中国移动云盘任务信息', msg)

@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import base64
 import hashlib
 import json
@@ -13,12 +16,6 @@ from urllib.parse import unquote, quote
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
 import requests
-try:
-    from Crypto.Cipher import AES
-    from Crypto.Util.Padding import pad
-except ImportError:
-    AES = None
-    pad = None
 
 os.environ.setdefault('TZ', 'Asia/Shanghai')
 try:
@@ -27,8 +24,6 @@ except AttributeError:
     pass
 
 DEVICE_ID_STORAGE_FILENAME = 'yunpan_device_ids.json'
-JS_CACHE_DIR = 'data'
-JS_CACHE_FILE = 'yunpan_token_cache.json'
 ua = 'Mozilla/5.0 (Linux; Android 11; M2012K10C Build/RP1A.200720.011; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/90.0.4430.210 Mobile Safari/537.36 MCloudApp/10.0.1'
 market_ua = random.choice([
     'Mozilla/5.0 (Linux; Android 14; 23127HN0CC Build/UKQ1.230917.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.146 Mobile Safari/537.36 MCloudApp/13.0.0 AppLanguage/zh-CN',
@@ -150,8 +145,7 @@ def fetch_device_id():
         resp = requests.post(url, data=payload_str, headers=headers, timeout=15)
         result = resp.json()
         if result.get('code') == 1100 and result.get('detail', {}).get('deviceId'):
-            device_id = 'B' + result['detail']['deviceId']
-            return device_id
+            return 'B' + result['detail']['deviceId']
         else:
             print(f'获取deviceId失败: {result}')
     except Exception as e:
@@ -159,10 +153,6 @@ def fetch_device_id():
     return None
 cloud_file_dummy_content = b'0'
 cloud_file_dummy_hash = hashlib.sha256(cloud_file_dummy_content).hexdigest()
-TOKEN_VALID_TIME = 21600000
-TOKEN_EXPIRE_SECONDS_FALLBACK = 2592000
-FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000
-REFRESH_TOKEN_AES_KEY = 'c7lXOigXahPnTViq'
 AI_CAMERA_SAMPLE_BASE64 = "data:image/jpg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAkGBxAQEBUQEBAVFRUVFRUVFRUVFRUVFRUVFRUWFhUVFRUYHSggGBolHRUVITEhJSkrLi4uFx8zODMsNygtLisBCgoKDg0OGhAQGi0lHyUtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLf/AABEIAAEAAQMBIgACEQEDEQH/xAAXAAEBAQEAAAAAAAAAAAAAAAAAAQID/8QAFhEBAQEAAAAAAAAAAAAAAAAAABEh/9oADAMBAAIQAxAAAAHhAH//xAAZEAEBAQEBAQAAAAAAAAAAAAABEQIhMUH/2gAIAQEAAT8A2M4Kxqf/xAAWEQEBAQAAAAAAAAAAAAAAAAAAESH/2gAIAQIBAT8Ap//EABYRAQEBAAAAAAAAAAAAAAAAAAABEf/aAAgBAwEBPwCf/9k="
 
 V3_UPLOAD_TASK_IDS = {106, 110, 113, 319, 409, 431, 604, 1003, 1005, 1017, 1055}
@@ -175,8 +165,6 @@ all_logs = ''
 user_amount = ''
 GLOBAL_DEBUG = False
 
-def current_millis():
-    return int(time.time() * 1000)
 def normalize_authorization(token):
     token = (token or '').strip()
     if token and not token.startswith('Basic '):
@@ -193,16 +181,7 @@ def generate_uuid():
         random.choice('89ab'), random_string(3), '-',
         random_string(12)
     ])
-def aes_encrypt(data, key):
-    if AES is None or pad is None:
-        raise ImportError('未安装 pycryptodome，无法执行加密')
-    key_bytes = key.encode('utf-8')
-    if not isinstance(data, str):
-        data = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
-    cipher = AES.new(key_bytes, AES.MODE_ECB)
-    encrypted = cipher.encrypt(pad(data.encode('utf-8'), AES.block_size))
-    return base64.b64encode(encrypted).decode('utf-8')
-def extract_raw_token(token, account):
+def extract_raw_token(token):
     token = normalize_authorization(token)
     if token.startswith('Basic '):
         token = token[6:]
@@ -214,43 +193,6 @@ def extract_raw_token(token, account):
     except Exception:
         pass
     return token
-def parse_token_key(authorization):
-    try:
-        token = normalize_authorization(authorization)
-        if not token:
-            return {'type': 'unknown', 'phone': '', 'expireAt': 0}
-        if token.startswith('Basic '):
-            token = token[6:]
-        decoded = base64.b64decode(token).decode('utf-8')
-        if not decoded:
-            return {'type': 'unknown', 'phone': '', 'expireAt': 0}
-        parts = decoded.split(':')
-        token_type = parts[0] if parts else 'unknown'
-        phone = parts[1] if len(parts) > 1 else ''
-        pipe_parts = decoded.split('|')
-        expire_at = int(pipe_parts[3]) if len(pipe_parts) > 3 and pipe_parts[3].isdigit() else 0
-        return {'type': token_type, 'phone': phone, 'expireAt': expire_at}
-    except Exception:
-        return {'type': 'unknown', 'phone': '', 'expireAt': 0}
-def is_token_expired(expire_at):
-    if not expire_at:
-        return False
-    return expire_at <= current_millis()
-def is_token_expiring_soon(expire_at):
-    if not expire_at:
-        return False
-    diff = expire_at - current_millis()
-    return 0 < diff <= FIVE_DAYS_MS
-def build_authorization(account, raw_token):
-    return f"Basic {base64.b64encode(f'mobile:{account}:{raw_token}'.encode()).decode()}"
-def parse_expire_time_to_millis(expire_time):
-    try:
-        expire_seconds = int(float(expire_time))
-    except (TypeError, ValueError):
-        expire_seconds = TOKEN_EXPIRE_SECONDS_FALLBACK
-    if expire_seconds <= 0:
-        expire_seconds = TOKEN_EXPIRE_SECONDS_FALLBACK
-    return current_millis() + expire_seconds * 1000
 def get_env_device_id():
     return (os.getenv('yunpan_device_id') or os.getenv('YDYP_DEVICE_ID') or '').strip()
 def normalize_market_device_input(device_id):
@@ -279,55 +221,6 @@ def get_storage_base_dir():
     return base_dir
 def get_storage_file_path(filename):
     return get_storage_base_dir() / filename
-def get_js_cache_path():
-    try:
-        return Path(os.getcwd()) / JS_CACHE_DIR / JS_CACHE_FILE
-    except Exception:
-        return get_storage_base_dir() / JS_CACHE_FILE
-def load_js_cache():
-    cache_path = get_js_cache_path()
-    try:
-        if cache_path.exists():
-            with open(cache_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    data.setdefault('accounts', {})
-                    return data
-    except Exception:
-        pass
-    return {'accounts': {}}
-def save_js_cache(data):
-    cache_path = get_js_cache_path()
-    try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f'保存JS缓存失败: {e}')
-def get_token_info(account):
-    js_cache = load_js_cache()
-    entry = (js_cache.get('accounts') or {}).get(account, {})
-    if entry and entry.get('authorization'):
-        return {
-            'token': entry['authorization'],
-            'expiresAt': entry.get('expireAt', 0),
-            'lastRefreshAt': entry.get('updatedAt', 0),
-        }
-    return {}
-def update_cache_authorization(account, authorization):
-    parsed = parse_token_key(authorization)
-    cache = load_js_cache()
-    accounts = cache.setdefault('accounts', {})
-    existing = accounts.get(account, {})
-    existing.update({
-        'authorization': normalize_authorization(authorization),
-        'phone': account,
-        'type': parsed.get('type', 'unknown'),
-        'expireAt': parsed.get('expireAt', 0) or int(existing.get('expireAt', 0)),
-        'updatedAt': current_millis(),
-    })
-    accounts[account] = existing
-    save_js_cache(cache)
 def get_device_id_storage_path():
     return get_storage_file_path(DEVICE_ID_STORAGE_FILENAME)
 def load_device_id_storage():
@@ -351,19 +244,14 @@ def save_device_id(device_id, account):
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f'保存deviceId失败: {e}')
-def save_token_info(account, token, expires_at, last_refresh_at):
-    update_cache_authorization(account, token)
-def ensure_account_storage_entry(account, token=''):
+def ensure_account_storage_entry(account):
     storage_path = get_device_id_storage_path()
     data = load_device_id_storage()
     account_data = data.get(account)
     if not isinstance(account_data, dict):
         account_data = {}
-    changed = False
-    if 'deviceId' not in account_data:
-        account_data['deviceId'] = ''
-        changed = True
-    if changed or account not in data:
+    if 'deviceId' not in account_data or account not in data:
+        account_data.setdefault('deviceId', '')
         data[account] = account_data
         try:
             with open(storage_path, 'w', encoding='utf-8') as f:
@@ -382,13 +270,9 @@ def print_device_id_notice():
     cached_accounts = [account for account, info in cached_data.items()
                        if isinstance(info, dict) and info.get('deviceId')]
     if cached_accounts:
-        print(f"已发现本地缓存 deviceId {len(cached_accounts)} 个账号；新账号将自动写入 yunpan_device_ids.json")
+        print(f"已发现本地缓存 deviceId {len(cached_accounts)} 个账号")
         return
-    print("未检测到 yunpan_device_id；脚本将优先读取本地缓存，缓存为空时自动生成并保存 deviceId")
-def print_storage_path_notice():
-    print(f"缓存文件目录: {get_storage_base_dir()}")
-    print(f"deviceId缓存文件: {get_device_id_storage_path()}")
-    print(f"Token缓存文件: {get_js_cache_path()}")
+    print("未检测到 yunpan_device_id；将自动生成并保存 deviceId")
 def send_notification(title, content):
     sent = False
     bark = (os.getenv('BARK_URL') or os.getenv('BARK_PUSH') or '').strip()
@@ -432,7 +316,7 @@ def send_notification(title, content):
         except Exception as e:
             print(f'Webhook通知失败: {e}')
     if not sent:
-        print('未配置通知渠道(BARK_URL/SENDKEY/PUSHPLUS_TOKEN/TG_BOT_TOKEN/WEBHOOK_URL)，跳过推送')
+        print('未配置通知渠道，跳过推送')
 
 class YP:
     def __init__(self, cookie):
@@ -462,10 +346,8 @@ class YP:
                 raise ValueError(f"⚠️ 变量值格式错误: {cookie}")
             self.Authorization = normalize_authorization(parts[0])
             self.account = parts[1].strip()
-            self.refresh_capable = AES is not None and pad is not None
-            self.load_persisted_authorization()
             self.load_or_create_market_device_profile()
-            self.auth_token = extract_raw_token(self.Authorization, self.account)
+            self.auth_token = extract_raw_token(self.Authorization)
             if len(self.account) >= 11:
                 self.encrypt_account = self.account[:3] + "****" + self.account[-4:]
             else:
@@ -478,54 +360,8 @@ class YP:
         except Exception as e:
             print(f"{e}")
             self.Authorization = None
-    def get_storage_record(self):
-        js_cache = load_js_cache()
-        entry = (js_cache.get('accounts') or {}).get(self.account, {})
-        if entry and entry.get('authorization'):
-            return {
-                'token': entry['authorization'],
-                'expiresAt': entry.get('expireAt', 0),
-                'lastRefreshAt': entry.get('updatedAt', 0),
-                'userDomainId': entry.get('userDomainId', ''),
-            }
-        return {}
-    def load_persisted_authorization(self):
-        env_parsed = parse_token_key(self.Authorization)
-        cached = self.get_storage_record()
-        cached_token = normalize_authorization(cached.get('token', ''))
-        if not cached_token:
-            return
-        cache_parsed = parse_token_key(cached_token)
-        if cache_parsed.get('phone') and cache_parsed['phone'] != self.account:
-            cache_parsed['phone'] = self.account
-        if cache_parsed.get('phone') and cache_parsed['phone'] != self.account:
-            return
-        env_expire = env_parsed.get('expireAt', 0) or int(cached.get('expiresAt') or 0)
-        cache_expire = cache_parsed.get('expireAt', 0) or int(cached.get('expiresAt') or 0)
-        if is_token_expired(env_expire) and not is_token_expired(cache_expire):
-            self.Authorization = cached_token
-            self.log(f'-Token缓存命中: env已过期，使用缓存Token（过期: {self._format_expire(cache_expire)}）')
-            return
-        if cache_expire > env_expire:
-            self.Authorization = cached_token
-            self.log(f'-Token缓存命中: 缓存Token更新（env: {self._format_expire(env_expire)}, cache: {self._format_expire(cache_expire)}）')
-            return
-        if not env_expire and not cache_expire:
-            self.Authorization = cached_token
-            self.log('-Token缓存命中: 使用缓存Token（env/cache均解析不出过期时间）')
-            return
-        if env_expire:
-            save_token_info(self.account, self.Authorization, env_expire, current_millis())
-    @staticmethod
-    def _format_expire(expire_at):
-        if not expire_at:
-            return '未知'
-        try:
-            return datetime.fromtimestamp(expire_at / 1000).strftime('%Y-%m-%d %H:%M:%S')
-        except Exception:
-            return str(expire_at)
     def load_or_create_market_device_profile(self):
-        ensure_account_storage_entry(self.account, self.Authorization)
+        ensure_account_storage_entry(self.account)
         fetched_id = fetch_device_id()
         if fetched_id:
             self.market_device_id = fetched_id
@@ -560,91 +396,6 @@ class YP:
         self.market_x_device_info = build_x_device_info(self.market_device_id)
         if self.market_device_id:
             save_device_id(self.market_device_id, self.account)
-    def save_authorization_record(self, token=None, user_domain_id=None, refreshed=False, expires_at=None):
-        token = normalize_authorization(token or self.Authorization)
-        update_cache_authorization(self.account, token)
-        uid = user_domain_id or self.user_domain_id
-        if uid:
-            cache = load_js_cache()
-            entry = cache.setdefault('accounts', {}).setdefault(self.account, {})
-            entry['userDomainId'] = uid
-            save_js_cache(cache)
-    def should_refresh_authorization(self, force=False):
-        if force:
-            return True, '强制刷新'
-        parsed = parse_token_key(self.Authorization)
-        expire_at = parsed.get('expireAt', 0)
-        if not expire_at:
-            stored = self.get_storage_record()
-            expire_at = int(stored.get('expiresAt') or 0)
-        if not expire_at:
-            return True, '无法解析Token过期时间'
-        if is_token_expired(expire_at):
-            return True, 'Token已过期'
-        if is_token_expiring_soon(expire_at):
-            days = (expire_at - current_millis()) / 86400000
-            return True, f'将在 {days:.1f} 天后过期'
-        days = (expire_at - current_millis()) / 86400000
-        return False, f'Token 状态良好（剩余 {days:.1f} 天）'
-    def refresh_authorization_token(self, force=False):
-        need_refresh, reason = self.should_refresh_authorization(force=force)
-        if not need_refresh:
-            self.log(f'-Authorization状态: {reason}')
-            return True
-        if not self.refresh_capable:
-            self.log('-未安装 pycryptodome，跳过Authorization自动刷新')
-            return True
-        refresh_headers = {
-            'Content-Type': 'application/json',
-            'User-Agent': ua,
-            'x-yun-tid': generate_uuid(),
-            'Authorization': self.Authorization,
-            'x-yun-api-version': 'v1',
-            'x-yun-module-type': '100',
-            'x-yun-op-type': '1',
-            'x-yun-app-channel': '10214200',
-            'x-yun-client-info': '||8||||||||||||',
-            'hcy-cool-flag': '1',
-        }
-        stored = self.get_storage_record()
-        if stored.get('userDomainId'):
-            refresh_headers['x-yun-uni'] = stored['userDomainId']
-        encrypted_data = aes_encrypt({'phoneNumber': self.account}, REFRESH_TOKEN_AES_KEY)
-        refresh_data = self.request_json('https://user-njs.yun.139.com/user/auth/refreshToken',
-                                         headers=refresh_headers,
-                                         data={'data': encrypted_data},
-                                         method='POST',
-                                         retries=1)
-        if not refresh_data:
-            self.log(f'-Authorization刷新失败: 接口无响应 ({reason})')
-            return True
-        code = str(refresh_data.get('code', ''))
-        data = refresh_data.get('data')
-        success = refresh_data.get('success', False)
-        is_success = (code in ('0', '00', '000', '0000')) or bool(success) or (code.startswith('0') and len(code) <= 4)
-        if not is_success or not isinstance(data, dict):
-            self.log(f"-Authorization刷新失败: {refresh_data.get('message') or refresh_data.get('msg', '未知错误')}")
-            return True
-        raw_token = data.get('token')
-        if not raw_token:
-            self.log('-Authorization刷新失败: 响应缺少token')
-            return True
-        expires_at = parse_expire_time_to_millis(data.get('expireTime'))
-        self.Authorization = build_authorization(self.account, raw_token)
-        self.auth_token = raw_token
-        self.save_authorization_record(token=self.Authorization, refreshed=True, expires_at=expires_at)
-        update_cache_authorization(self.account, self.Authorization)
-        self.log(f'-Authorization自动刷新成功: {reason}')
-        self.log(f"-Authorization有效期: {datetime.fromtimestamp(expires_at / 1000).strftime('%Y-%m-%d %H:%M:%S')}")
-        return True
-    def sync_token_storage(self):
-        stored = self.get_storage_record()
-        expires_at = stored.get('expiresAt', current_millis() + TOKEN_VALID_TIME)
-        last_refresh_at = stored.get('lastRefreshAt', 0)
-        save_token_info(self.account, self.Authorization, expires_at, last_refresh_at)
-        if self.market_device_id and not self.market_device_is_placeholder:
-            save_device_id(self.market_device_id, self.account)
-        self.save_authorization_record(token=self.Authorization, user_domain_id=self.user_domain_id)
     def log(self, content):
         print(content)
         self.user_log_lines.append(content)
@@ -663,7 +414,6 @@ class YP:
     def run(self):
         self.log(f'账号: {self.encrypt_account}')
         if self.jwt():
-            self.refresh_authorization_token()
             self.signin_status()
             self.get_tasklist(url='sign_in_3', app_type='cloud_app')
             self.log(f'\n🔥 热门任务')
@@ -671,7 +421,6 @@ class YP:
             self.complete_notice_task()
             self.get_tasklist(url='newsign_139mail', app_type='email_app')
             self.receive()
-            self.sync_token_storage()
             global all_logs
             user_log_str = "\n".join(self.user_log_lines)
             all_logs += f"用户【{self.encrypt_account}】日志:\n{user_log_str}\n\n"
@@ -1221,8 +970,6 @@ class YP:
         headers['Accept'] = '*/*'
         headers['x-DeviceInfo'] = f'||36|{self.client_version}||MI 8|{uuid.uuid4()}||android 10|||||'
         return headers
-    def get_ai_camera_sample_base64(self):
-        return AI_CAMERA_SAMPLE_BASE64
     @staticmethod
     def is_ai_chat_success(text):
         payloads = []
@@ -1245,10 +992,7 @@ class YP:
         if not self.user_domain_id:
             self.log('AI相机任务失败: 缺少用户信息')
             return False
-        image_data = self.get_ai_camera_sample_base64()
-        if not image_data:
-            self.log('AI相机任务跳过: 无样图数据')
-            return True
+        image_data = AI_CAMERA_SAMPLE_BASE64
         recognize_payload = json.dumps({
             'channelId': '101',
             'userId': self.user_domain_id,
@@ -1909,7 +1653,6 @@ if __name__ == "__main__":
     cookies = re.split(r'[&]', token)
     print(f"共获取到 {len(cookies)} 个账号")
     print_device_id_notice()
-    print_storage_path_notice()
     for i, account_info in enumerate(cookies, start=1):
         print(f"\n======== ▷ 第 {i} 个账号 ◁ ========")
         yp_instance = YP(account_info)

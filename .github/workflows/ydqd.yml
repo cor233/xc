@@ -21,19 +21,20 @@ jobs:
           python-version: '3.10'
 
       - name: 安装依赖
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: 缓存Token与设备ID
+      - name: 缓存设备ID
         uses: actions/cache@v4
         with:
-          path: |
-            ydqd/yunpan_device_ids.json
-            ydqd/data/yunpan_token_cache.json
-          key: caiyun-cache
+          path: ydqd/yunpan_device_ids.json
+          key: caiyun-device
 
       - name: 执行签到
         env:
           yunpan: ${{ secrets.YUNPAN_TOKEN }}
+          yunpan_device_id: ${{ secrets.YUNPAN_DEVICE_ID }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python yunpan.py

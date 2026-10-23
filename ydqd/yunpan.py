@@ -163,10 +163,7 @@ user_amount = ''
 GLOBAL_DEBUG = False
 
 def normalize_authorization(token):
-    token = (token or '').strip()
-    if token and not token.startswith('Basic '):
-        return f'Basic {token}'
-    return token
+    return (token or '').strip()
 def random_string(length=16):
     chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
     return ''.join(random.choice(chars) for _ in range(length))
@@ -179,7 +176,7 @@ def generate_uuid():
         random_string(12)
     ])
 def extract_raw_token(token):
-    token = normalize_authorization(token)
+    token = (token or '').strip()
     if token.startswith('Basic '):
         token = token[6:]
     try:
@@ -341,7 +338,7 @@ class YP:
             parts = cookie.split("#")
             if len(parts) < 2:
                 raise ValueError(f"⚠️ 变量值格式错误: {cookie}")
-            self.Authorization = normalize_authorization(parts[0])
+            self.Authorization = parts[0].strip()
             self.account = parts[1].strip()
             self.load_or_create_market_device_profile()
             self.auth_token = extract_raw_token(self.Authorization)
@@ -359,15 +356,6 @@ class YP:
             self.Authorization = None
     def load_or_create_market_device_profile(self):
         ensure_account_storage_entry(self.account)
-        fetched_id = fetch_device_id()
-        if fetched_id:
-            self.market_device_id = fetched_id
-            self.market_device_cookie_value = fetched_id
-            self.market_x_device_info = build_x_device_info(fetched_id)
-            self.market_device_from_env = False
-            self.market_device_is_placeholder = False
-            save_device_id(fetched_id, self.account)
-            return
         env_device_id = get_env_device_id()
         if env_device_id:
             device_id, cookie_value = normalize_market_device_input(env_device_id)
@@ -383,16 +371,24 @@ class YP:
             self.market_device_id = device_id
             self.market_device_cookie_value = cookie_value
             self.market_x_device_info = build_x_device_info(device_id)
+            self.market_device_from_env = False
             self.market_device_is_placeholder = False
             return
-        self.market_device_id = fetched_id or ''
-        if not self.market_device_id:
-            self.market_device_id = str(uuid.uuid4()).replace('-', '')
-            self.market_device_is_placeholder = True
+        fetched_id = fetch_device_id()
+        if fetched_id:
+            device_id, cookie_value = normalize_market_device_input(fetched_id)
+            self.market_device_id = device_id
+            self.market_device_cookie_value = cookie_value
+            self.market_x_device_info = build_x_device_info(device_id)
+            self.market_device_from_env = False
+            self.market_device_is_placeholder = False
+            save_device_id(device_id, self.account)
+            return
+        self.market_device_id = str(uuid.uuid4()).replace('-', '')
+        self.market_device_is_placeholder = True
         _, self.market_device_cookie_value = normalize_market_device_input(self.market_device_id)
         self.market_x_device_info = build_x_device_info(self.market_device_id)
-        if self.market_device_id:
-            save_device_id(self.market_device_id, self.account)
+        save_device_id(self.market_device_id, self.account)
     def log(self, content):
         print(content)
         self.user_log_lines.append(content)

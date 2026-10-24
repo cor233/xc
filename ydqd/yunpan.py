@@ -467,11 +467,7 @@ class YP:
             self.Authorization = normalize_authorization(parts[0])
             self.account = parts[1].strip()
             self.nickname = parts[2].strip() if len(parts) > 2 else ''
-            if len(self.account) >= 11:
-                self.encrypt_account = self.account[:3] + "****" + self.account[-4:]
-            else:
-                self.encrypt_account = self.account
-            self.display_name = self.nickname or self.encrypt_account
+            self.display_name = self.nickname if self.nickname else '未命名账号'
             self.load_persisted_authorization()
             self.load_or_create_market_device_profile()
             self.auth_token = extract_raw_token(self.Authorization, self.account)
@@ -634,7 +630,7 @@ class YP:
 
     @catch_errors
     def run(self):
-        self.log(f'账号: {self.display_name} ({self.encrypt_account})')
+        self.log(f'账号: {self.display_name}')
         if self.jwt():
             self.check_authorization_status()
             self.signin_status()

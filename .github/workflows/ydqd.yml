@@ -50,5 +50,10 @@ jobs:
 
       - name: 诊断 caiyun 接口
         run: |
-          echo "===== 测试 7071 端口 ====="
-          curl -v --max-time 15 "https://caiyun.feixin.10086.cn:7071/portal/auth/tyrzLogin.action" 2>&1 | head -100
+          echo "===== POST tyrzLogin ====="
+          curl -s -o /tmp/resp.txt -w "HTTP_CODE:%{http_code}\n" \
+            -X POST --max-time 15 \
+            "https://caiyun.feixin.10086.cn:7071/portal/auth/tyrzLogin.action?ssoToken=test" \
+            -H "User-Agent: Mozilla/5.0" -H "Accept: */*"
+          echo "----- body -----"
+          head -c 500 /tmp/resp.txt

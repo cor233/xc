@@ -32,7 +32,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 恢复缓存（deviceId + token 缓存）
+      - name: 设置公共DNS
+        run: |
+          sudo rm -f /etc/resolv.conf
+          echo "nameserver 223.5.5.5" | sudo tee /etc/resolv.conf
+          echo "nameserver 8.8.8.8" | sudo tee -a /etc/resolv.conf
+          echo "options timeout:2 attempts:3" | sudo tee -a /etc/resolv.conf
+          sudo systemctl disable --now systemd-resolved || true
+          echo "DNS 设置完成，当前 resolv.conf 内容:"
+          cat /etc/resolv.conf
+          echo "正在验证 orches.yun.139.com 解析..."
+          getent hosts orches.yun.139.com || echo "解析失败，但脚本会继续尝试"
+
+      - name: 恢复缓存
         uses: actions/cache@v4
         with:
           path: |

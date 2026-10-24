@@ -35,16 +35,14 @@ jobs:
       - name: 绑定 hosts 解析
         run: |
           echo "112.33.111.196 orches.yun.139.com" | sudo tee -a /etc/hosts
-          echo "112.33.111.196 caiyun.feixin.10086.cn" | sudo tee -a /etc/hosts
-          echo "112.33.111.196 m.mcloud.139.com" | sudo tee -a /etc/hosts
-          echo "112.33.111.196 personal-kd-njs.yun.139.com" | sudo tee -a /etc/hosts
-          echo "112.33.111.196 ai.yun.139.com" | sudo tee -a /etc/hosts
-          echo "112.33.111.196 user-njs.yun.139.com" | sudo tee -a /etc/hosts
-          echo "112.33.111.196 yun.139.com" | sudo tee -a /etc/hosts
-          echo "112.33.111.196 slw.h5cmpassport.com" | sudo tee -a /etc/hosts
-          sudo systemctl disable --now systemd-resolved || true
+          echo "REAL_IP_CAIYUN caiyun.feixin.10086.cn" | sudo tee -a /etc/hosts
+          echo "REAL_IP_SLW slw.h5cmpassport.com" | sudo tee -a /etc/hosts
+          echo "REAL_IP_MCLOUD m.mcloud.139.com" | sudo tee -a /etc/hosts
+          echo "REAL_IP_KD personal-kd-njs.yun.139.com" | sudo tee -a /etc/hosts
+          echo "REAL_IP_AI ai.yun.139.com" | sudo tee -a /etc/hosts
+          echo "REAL_IP_USER user-njs.yun.139.com" | sudo tee -a /etc/hosts
+          echo "REAL_IP_YUN yun.139.com" | sudo tee -a /etc/hosts
           cat /etc/hosts
-          getent hosts orches.yun.139.com || echo "hosts 已写入，getent 仍失败"
 
       - name: 恢复缓存
         uses: actions/cache@v4

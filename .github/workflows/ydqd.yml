@@ -7,12 +7,12 @@ on:
 
 concurrency:
   group: ydqd-signin
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: ydqd
@@ -32,27 +32,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 绑定 hosts 解析
+      - name: 绑定 hosts
         run: |
           echo "112.33.111.196 orches.yun.139.com" | sudo tee -a /etc/hosts
-          echo "REAL_IP_CAIYUN caiyun.feixin.10086.cn" | sudo tee -a /etc/hosts
-          echo "REAL_IP_SLW slw.h5cmpassport.com" | sudo tee -a /etc/hosts
-          echo "REAL_IP_MCLOUD m.mcloud.139.com" | sudo tee -a /etc/hosts
-          echo "REAL_IP_KD personal-kd-njs.yun.139.com" | sudo tee -a /etc/hosts
-          echo "REAL_IP_AI ai.yun.139.com" | sudo tee -a /etc/hosts
-          echo "REAL_IP_USER user-njs.yun.139.com" | sudo tee -a /etc/hosts
-          echo "REAL_IP_YUN yun.139.com" | sudo tee -a /etc/hosts
+          echo "36.138.55.14 caiyun.feixin.10086.cn" | sudo tee -a /etc/hosts
           cat /etc/hosts
-
-      - name: 恢复缓存
-        uses: actions/cache@v4
-        with:
-          path: |
-            ydqd/yunpan_device_ids.json
-            ydqd/data/yunpan_token_cache.json
-          key: caiyun-cache-${{ github.run_id }}
-          restore-keys: |
-            caiyun-cache-
+          getent hosts orches.yun.139.com || echo "orches 解析失败"
+          getent hosts caiyun.feixin.10086.cn || echo "caiyun 解析失败"
 
       - name: 执行签到
         env:

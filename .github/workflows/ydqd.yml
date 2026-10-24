@@ -47,3 +47,8 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python yunpan.py
+
+      - name: 诊断 caiyun 接口
+        run: |
+          echo "===== 测试 7071 端口 ====="
+          curl -v --max-time 15 "https://caiyun.feixin.10086.cn:7071/portal/auth/tyrzLogin.action" 2>&1 | head -100

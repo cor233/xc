@@ -78,6 +78,7 @@ class SourceClient:
         self._info_cache = {}
         self._ty_meta = {}
         self._boot_lock = threading.Lock()
+        self._map_lock = threading.RLock()
 
     def _boot(self):
         if self._app is not None:
@@ -87,8 +88,9 @@ class SourceClient:
                 return
             disk = self._loadDisk()
             self._device_id = disk.get('device_id') or ''
-            self._plat_map = dict(disk.get('plat_map') or {})
-            self._ty_meta = dict(disk.get('meta') or {})
+            with self._map_lock:
+                self._plat_map = dict(disk.get('plat_map') or {})
+                self._ty_meta = dict(disk.get('meta') or {})
             self._app = requests.Session()
             self._app.headers.update({'User-Agent': APP_UA, 'Content-Type': 'application/json'})
             self.log('拾音盘源就绪 (已提取专辑 %d 个)' % len(self._plat_map))
@@ -105,17 +107,18 @@ class SourceClient:
         return {}
 
     def _saveDisk(self):
+        with self._map_lock:
+            payload = {
+                'device_id': self._device_id or '',
+                'plat_map': dict(self._plat_map),
+                'meta': dict(self._ty_meta),
+            }
         with _DISK_LOCK:
             try:
-                d = {
-                    'device_id': self._device_id or '',
-                    'plat_map': self._plat_map,
-                    'meta': self._ty_meta,
-                }
                 path = os.path.join(APP_DIR, CACHE_FILE)
                 tmp = path + '.tmp'
                 with open(tmp, 'w', encoding='utf-8') as f:
-                    json.dump(d, f, ensure_ascii=False)
+                    json.dump(payload, f, ensure_ascii=False)
                 os.replace(tmp, path)
             except Exception as e:
                 self.log('缓存落盘失败: %s' % e)
@@ -166,22 +169,24 @@ class SourceClient:
         j = self._json('GET', TY + '/search', params={'keyword': keyword}, timeout=15)
         items = (j.get('data') or {}).get('items') or []
         added = False
-        for it in items:
-            if it.get('id'):
-                k = str(it['id'])
-                if k not in self._ty_meta:
-                    added = True
-                self._ty_meta[k] = {x: it.get(x) for x in META_KEYS}
+        with self._map_lock:
+            for it in items:
+                if it.get('id'):
+                    k = str(it['id'])
+                    if k not in self._ty_meta:
+                        added = True
+                    self._ty_meta[k] = {x: it.get(x) for x in META_KEYS}
+            if added:
+                if len(self._ty_meta) > 500:
+                    keep = list(self._ty_meta.items())[-300:]
+                    self._ty_meta = dict(keep)
         if added:
-            if len(self._ty_meta) > 500:
-                keep = list(self._ty_meta.items())[-300:]
-                self._ty_meta = dict(keep)
             self._saveDisk()
         return items
 
     def _albumMeta(self, uid, ty_id):
         try:
-            j = self._json('GET', API + '/api/users/%d/albums' % uid, timeout=15)
+            j = self._json('GET', API + '/api/users/%s/albums' % uid, timeout=15)
             for a in j.get('data') or []:
                 if str(a.get('external_id')) == str(ty_id):
                     return a
@@ -248,7 +253,8 @@ class SourceClient:
             return self._info_cache[ty_id]
         uid = self._uidGet()
         meta = {}
-        plat = self._plat_map.get(ty_id)
+        with self._map_lock:
+            plat = self._plat_map.get(ty_id)
         if plat is None:
             meta = self._albumMeta(uid, ty_id)
             plat = meta.get('id')
@@ -257,17 +263,20 @@ class SourceClient:
             plat = self._doImport(uid, ty_id)
             if plat is None:
                 raise RuntimeError('提取未完成, 请稍后重试')
-            self._plat_map[ty_id] = plat
+            with self._map_lock:
+                self._plat_map[ty_id] = plat
             self._saveDisk()
-        if not meta and ty_id not in self._ty_meta:
+        with self._map_lock:
+            cached = dict(self._ty_meta.get(ty_id) or {})
+        if not meta and not cached:
             meta = self._albumMeta(uid, ty_id)
         tracks = self._getTracks(plat, uid)
         if not tracks and not _retried:
             self.log('曲目为空, 重置缓存重试: %s' % ty_id)
-            self._plat_map.pop(ty_id, None)
+            with self._map_lock:
+                self._plat_map.pop(ty_id, None)
             self._saveDisk()
             return self._ensureAlbum(ty_id, _retried=True)
-        cached = self._ty_meta.get(ty_id) or {}
         info = {
             'platform_id': plat, 'ty_id': ty_id,
             'title': meta.get('title') or cached.get('title') or '',
@@ -325,18 +334,33 @@ class SourceClient:
         return '%s/tingyou/stream?album=%s&idx=%s' % (API, chap['album_id'], chap['track_no'])
 
 
-def download_audio(url, save_path, retry=3, log_callback=None, stop_event=None):
+def download_audio(url, save_path, retry=3, log_callback=None, stop_event=None,
+                   connect_timeout=10, read_timeout=15):
     temp_path = save_path + '.tmp'
     for attempt in range(retry):
         if stop_event and stop_event.is_set():
             return False
         try:
             headers = {'User-Agent': APP_UA, 'Referer': API + '/'}
-            resp = requests.get(url, headers=headers, stream=True, timeout=30)
+            if log_callback:
+                log_callback('请求音频(%d/%d): %s' % (attempt + 1, retry, url))
+            resp = requests.get(url, headers=headers, stream=True,
+                                timeout=(connect_timeout, read_timeout))
             resp.raise_for_status()
             ct = (resp.headers.get('Content-Type') or '').lower()
-            if 'html' in ct or 'json' in ct:
+            cl = resp.headers.get('Content-Length')
+            if log_callback:
+                log_callback('响应: %s | CT=%s | CL=%s | 最终URL=%s'
+                             % (resp.status_code, ct or '-', cl or '-', resp.url))
+            if 'html' in ct or 'json' in ct or 'text/' in ct:
                 raise Exception('返回了非音频内容: %s' % ct)
+            if cl is not None:
+                try:
+                    if int(cl) == 0:
+                        raise Exception('Content-Length 为 0')
+                except ValueError:
+                    pass
+            total = 0
             with open(temp_path, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     if not chunk:
@@ -344,16 +368,19 @@ def download_audio(url, save_path, retry=3, log_callback=None, stop_event=None):
                     if stop_event and stop_event.is_set():
                         raise InterruptedError()
                     f.write(chunk)
-            if os.path.getsize(temp_path) == 0:
-                raise Exception('下载文件大小为 0')
+                    total += len(chunk)
+            if total == 0:
+                raise Exception('下载字节数为 0')
             os.replace(temp_path, save_path)
+            if log_callback:
+                log_callback('完成: %s (%d 字节)' % (os.path.basename(save_path), total))
             return True
         except InterruptedError:
             return False
         except Exception as e:
+            if log_callback:
+                log_callback('下载异常(%d/%d): %s' % (attempt + 1, retry, e))
             if attempt == retry - 1:
-                if log_callback:
-                    log_callback('下载失败: %s' % e)
                 return False
             time.sleep(2)
         finally:
@@ -369,7 +396,7 @@ class DownloadApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title('听书下载器 (拾音盘源)')
+        self.root.title('拾音盘音频下载器')
         self.root.geometry('1000x720')
         self.root.minsize(820, 580)
 
@@ -604,14 +631,19 @@ class DownloadApp:
         self.log('找到 %d 本书籍' % len(books))
 
     def on_book_select(self, event):
+        should_stop = False
         with self.downloading_lock:
             if self.downloading:
                 if not messagebox.askyesno('提示', '当前有下载任务, 是否停止并切换书籍?'):
                     return
-                self.stop_download_internal()
-                if self.downloading:
-                    self.log('旧下载任务尚未完全停止, 请稍候再切换书籍')
-                    return
+                should_stop = True
+        if should_stop:
+            self.stop_download_internal()
+            with self.downloading_lock:
+                still = self.downloading
+            if still:
+                self.log('旧下载任务尚未完全停止, 请稍候再切换书籍')
+                return
         with self.record_lock:
             self.record_cache.clear()
         self.json_path = None
@@ -665,18 +697,27 @@ class DownloadApp:
         self.stop_event.set()
         self.paused_event.clear()
         if self.download_thread and self.download_thread.is_alive():
-            self.download_thread.join(timeout=15)
+            self.download_thread.join(timeout=5)
             if self.download_thread.is_alive():
-                self.log('强制终止超时, 下载线程仍在后台收尾, 请勿重复操作')
+                self.log('下载线程仍在收尾, 请稍候...')
                 return
         with self.downloading_lock:
             self.downloading = False
         self.stop_event.clear()
-        try:
-            self.download_btn.config(state='normal')
-            self.pause_btn.config(text='暂停')
-        except tk.TclError:
-            pass
+
+        def _restore_ui():
+            try:
+                self.download_btn.config(state='normal')
+                self.pause_btn.config(text='暂停')
+            except tk.TclError:
+                pass
+        if threading.current_thread() is threading.main_thread():
+            _restore_ui()
+        else:
+            try:
+                self.root.after(0, _restore_ui)
+            except tk.TclError:
+                pass
         self.log('已停止下载任务')
 
     def stop_download(self):
@@ -748,11 +789,19 @@ class DownloadApp:
         self.update_completed_failed(completed, failed)
 
     def update_completed_failed(self, completed, failed):
-        try:
-            self.completed_label.config(text='完成: %d' % completed)
-            self.failed_label.config(text='失败: %d' % failed)
-        except tk.TclError:
-            pass
+        def _update():
+            try:
+                self.completed_label.config(text='完成: %d' % completed)
+                self.failed_label.config(text='失败: %d' % failed)
+            except tk.TclError:
+                pass
+        if threading.current_thread() is threading.main_thread():
+            _update()
+        else:
+            try:
+                self.root.after(0, _update)
+            except tk.TclError:
+                pass
 
     def _update_stats_from_cache(self):
         with self.record_lock:
@@ -1006,7 +1055,10 @@ class DownloadApp:
                 if not submit_next():
                     break
 
-        executor.shutdown(wait=True)
+        if self.stop_event.is_set():
+            executor.shutdown(wait=False)
+        else:
+            executor.shutdown(wait=True)
 
     def download_range_worker(self, start, end):
         try:
@@ -1043,16 +1095,24 @@ class DownloadApp:
     def download_finished(self):
         if self.destroyed:
             return
+        stopped = self.stop_event.is_set()
         with self.downloading_lock:
             self.downloading = False
         self.paused_event.clear()
         self.stop_event.clear()
+
+        def _restore_ui():
+            try:
+                self.download_btn.config(state='normal')
+                self.pause_btn.config(text='暂停')
+            except tk.TclError:
+                pass
         try:
-            self.download_btn.config(state='normal')
-            self.pause_btn.config(text='暂停')
+            self.root.after(0, _restore_ui)
         except tk.TclError:
             pass
-        self.log('所有任务已完成')
+
+        self.log('下载任务已停止' if stopped else '所有任务已完成')
         self._update_stats_from_cache()
         self.download_thread = None
         if self.close_waiting:
@@ -1093,7 +1153,7 @@ class DownloadApp:
             self.paused_event.clear()
             self.log('正在停止下载任务, 请稍候...')
             if self.download_thread and self.download_thread.is_alive():
-                self.download_thread.join(timeout=10)
+                self.download_thread.join(timeout=3)
             self.flush_record()
             if not self.destroyed:
                 self.destroyed = True

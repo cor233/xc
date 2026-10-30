@@ -443,7 +443,7 @@ class DownloadApp:
 
     def create_widgets(self):
         top = ttk.Frame(self.root)
-        ttk.Label(top, text='搜索书名/专辑ID/URL:').pack(side=tk.LEFT, padx=5)
+        ttk.Label(top, text='搜索:').pack(side=tk.LEFT, padx=5)
         self.search_entry = ttk.Entry(top, width=36)
         self.search_entry.pack(side=tk.LEFT, padx=5)
         self.search_entry.bind('<Return>', lambda e: self.start_search())

@@ -1,4 +1,4 @@
-name: Build tyfm EXE
+name: Build TYFM EXE
 
 on:
   workflow_dispatch:
@@ -19,22 +19,13 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller requests pycryptodome
-          if (Test-Path tyfm/requirements.txt) { pip install -r tyfm/requirements.txt }
+          pip install pyinstaller requests
 
       - name: 打包成 EXE
-        run: |
-          pyinstaller --onefile `
-            --name tyfm `
-            --windowed `
-            --hidden-import Crypto.Cipher.ChaCha20_Poly1305 `
-            --hidden-import Crypto.Cipher.AES `
-            --hidden-import Crypto.Random `
-            --collect-all Crypto `
-            tyfm/tyfm.py
+        run: pyinstaller --onefile --name tyfm --windowed tyfm/tyfm.py
 
       - name: 上传 Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tyfm-exe
+          name: tyfm
           path: dist/tyfm.exe

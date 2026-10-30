@@ -6,13 +6,14 @@ import random
 import re
 import time
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from os import path
 from pathlib import Path
 from urllib.parse import unquote
+
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
-
 import requests
 
 try:
@@ -22,7 +23,7 @@ except ImportError:
     AES = None
     pad = None
 
-SCRIPT_VERSION = '5.1.4'
+SCRIPT_VERSION = '5.1.5'
 
 DEVICE_ID_STORAGE_FILENAME = 'yunpan_device_ids.json'
 JS_CACHE_DIR = 'data'
@@ -275,11 +276,6 @@ def normalize_market_device_input(device_id):
     return header_value, cookie_value
 
 
-def build_x_device_info(device_id, net_type='wifi', terminal_type='8',
-                        version='13.0.0', brand='Android', model='MI 8', system='Android 10'):
-    return f"{net_type}||{terminal_type}|{version}|{brand}|{model}|{device_id}||{system.lower()}|||||"
-
-
 def get_storage_base_dir():
     custom_storage_dir = (os.environ.get('MCLD_DATA_DIR')
                           or os.environ.get('yunpan_storage_dir')
@@ -447,7 +443,7 @@ class YP:
             self.auth_token = None
             self.click_num = 15
             self.client_version = '13.0.0'
-            self.market_base_url = 'https://yun.139.com'
+            self.market_base_url = 'https://caiyun.feixin.10086.cn'
             self.user_domain_id = ''
             self.market_device_id = ''
             self.market_headers = {}
@@ -478,7 +474,7 @@ class YP:
             self.jwtHeaders = {
                 'User-Agent': ua,
                 'Accept': 'application/json, text/plain, */*',
-                'Host': 'yun.139.com',
+                'Host': 'caiyun.feixin.10086.cn',
                 'Authorization': self.Authorization,
             }
 
@@ -692,7 +688,17 @@ class YP:
         try:
             return response.json()
         except ValueError:
-            preview = (response.text or '')[:120].replace('\n', ' ')
+            text = response.text
+            if '<BaseResult>' in text:
+                try:
+                    root = ET.fromstring(text)
+                    success = root.find('success').text == 'true' if root.find('success') is not None else False
+                    code = root.find('code').text if root.find('code') is not None else ''
+                    msg = root.find('message').text if root.find('message') is not None else ''
+                    return {'code': code, 'success': success, 'msg': msg, 'result': {}}
+                except Exception:
+                    pass
+            preview = (text or '')[:120].replace('\n', ' ')
             self.log(f'[诊断] 解析失败 | HTTP {response.status_code} | Content-Type: {response.headers.get("content-type", "")} | 预览: {preview}')
             return None
 
@@ -730,17 +736,17 @@ class YP:
                                  json_data=request_json_data, params=params, method=method, debug=debug, retries=retries)
 
     def click_task(self, task_id, key='task'):
-        return self.request_market_json(f'{self.market_base_url}/orchestration/personalCloud/signin/task/click?key={key}&id={task_id}')
+        return self.request_market_json(f'{self.market_base_url}/market/signin/task/click?key={key}&id={task_id}')
 
     @catch_errors
     def signin_status(self):
         self.sleep()
-        check_url = f'{self.market_base_url}/orchestration/personalCloud/signin/page/infoV3'
+        check_url = f'{self.market_base_url}/market/signin/page/infoV3'
         check_data = self.request_market_json(check_url, params={'client': 'app'})
         if not check_data:
             self.log('查询签到失败: 接口无响应')
             return
-        if check_data.get('code') != 0:
+        if str(check_data.get('code')) not in ('0', '0000', '200'):
             self.log(f"查询签到失败: {check_data.get('msg', '未知错误')}")
             return
         if self.get_today_sign_state(check_data.get('result', {})):
@@ -748,11 +754,11 @@ class YP:
             self.log('✅已签到')
             return
         self.sleep(1, 2)
-        signin_data = self.request_market_json(f'{self.market_base_url}/orchestration/personalCloud/signin/page/startSignIn', params={'client': 'app'})
+        signin_data = self.request_market_json(f'{self.market_base_url}/market/signin/page/startSignIn', params={'client': 'app'})
         if not signin_data:
             self.log('签到失败: 接口无响应')
             return
-        if signin_data.get('code') == 0 and self.get_today_sign_state(signin_data.get('result', {})):
+        if str(signin_data.get('code')) in ('0', '200') and self.get_today_sign_state(signin_data.get('result', {})):
             self.signin_ok = True
             self.log('✅签到成功')
             return
@@ -768,7 +774,7 @@ class YP:
 
     def get_cloud_tasklist_v2(self):
         for group, title in self.get_cloud_task_groups():
-            return_data = self.request_market_json(f'{self.market_base_url}/orchestration/personalCloud/signin/task/taskListV2',
+            return_data = self.request_market_json(f'{self.market_base_url}/market/signin/task/taskListV2',
                                                    json_body=True, method='POST', data={
                 'marketname': 'sign_in_3',
                 'clientVersion': self.client_version,
@@ -777,7 +783,7 @@ class YP:
             if not return_data:
                 self.log(f'获取任务列表失败: {group}')
                 continue
-            if return_data.get('code') != 0:
+            if str(return_data.get('code')) not in ('0', '0000', '200'):
                 self.log(f"获取任务列表失败: {group} {return_data.get('msg', '未知错误')}")
                 continue
             tasks = return_data.get('result', {}).get(group, [])
@@ -803,7 +809,7 @@ class YP:
             self.log(f'-去完成: {task_name}')
             for task_key in task_keys:
                 click_data = self.click_task(task_id, task_key)
-                if click_data and click_data.get('code') == 0:
+                if click_data and str(click_data.get('code')) in ('0', '200'):
                     continue
                 msg = click_data.get('msg', '未知错误') if click_data else '接口无响应'
                 self.log(f'-任务登记失败: {task_name} {msg}')
@@ -817,19 +823,19 @@ class YP:
 
     @catch_errors
     def receive(self):
-        info_data = self.request_market_json(f'{self.market_base_url}/orchestration/personalCloud/signin/page/infoV3', params={'client': 'app'})
+        info_data = self.request_market_json(f'{self.market_base_url}/market/signin/page/infoV3', params={'client': 'app'})
         if not info_data:
             self.log('查询云朵失败: 接口无响应')
             return
-        if info_data.get('code') != 0:
+        if str(info_data.get('code')) not in ('0', '0000', '200'):
             self.log(f"查询云朵失败: {info_data.get('msg', '未知错误')}")
             return
         info_result = info_data.get('result', {})
         pending_amount = info_result.get('toReceive', 0)
         total_amount = info_result.get('total', 0)
         if pending_amount:
-            receive_data = self.request_market_json(f'{self.market_base_url}/orchestration/personalCloud/signin/page/receiveV3', params={'client': 'app'}, json_body=True, method='POST', data={})
-            if receive_data and receive_data.get('code') == 0:
+            receive_data = self.request_market_json(f'{self.market_base_url}/market/signin/page/receiveV3', params={'client': 'app'}, json_body=True, method='POST', data={})
+            if receive_data and str(receive_data.get('code')) in ('0', '200'):
                 receive_result = receive_data.get('result', {})
                 self.log(f'-领取云朵:{receive_result.get("receive", pending_amount)}云朵')
                 total_amount = receive_result.get('total', total_amount)

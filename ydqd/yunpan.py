@@ -12,19 +12,21 @@ from pathlib import Path
 from urllib.parse import unquote
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
+
 import requests
 
-os.environ.setdefault('TZ', 'Asia/Shanghai')
 try:
-    time.tzset()
-except AttributeError:
-    pass
+    from Crypto.Cipher import AES
+    from Crypto.Util.Padding import pad
+except ImportError:
+    AES = None
+    pad = None
+
+SCRIPT_VERSION = '5.1.3'
 
 DEVICE_ID_STORAGE_FILENAME = 'yunpan_device_ids.json'
 JS_CACHE_DIR = 'data'
 JS_CACHE_FILE = 'yunpan_token_cache.json'
-TOKEN_VALID_TIME = 21600000
-FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000
 
 ua = 'Mozilla/5.0 (Linux; Android 11; M2012K10C Build/RP1A.200720.011; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/90.0.4430.210 Mobile Safari/537.36 MCloudApp/10.0.1'
 market_ua = random.choice([
@@ -39,6 +41,7 @@ market_ua = random.choice([
     'Mozilla/5.0 (Linux; Android 14; 22081212C Build/UKQ1.230917.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.146 Mobile Safari/537.36 MCloudApp/13.0.0 AppLanguage/zh-CN',
     'Mozilla/5.0 (Linux; Android 14; LLY-AN00 Build/HONORLLY-AN00; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/142.0.6522.118 Mobile Safari/537.36 MCloudApp/13.0.0 AppLanguage/zh-CN',
 ])
+
 _SM_PUBLIC_KEY = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC8KHAcHbkCn5rxGgGJE+07tY+pt86D/oZ7sA51FaEBv2jgno2TI9zHJVYKJynmiKpixgwUcv93EfWIrU/p/UCs5Vu+odS3I4UBp3R7IZ1A0W01FkumAHYW2PQpMm8ueQKPLUq/idkpG/9b2JDv/qU+Ks36nbUPwlW4CjdfrV+V9QIDAQAB"
 _SM_ORGANIZATION = "FXlyfmWg2AzwbrxDKSv5"
 _SM_ANDROID_MODELS = [
@@ -155,22 +158,54 @@ def fetch_device_id():
         resp = requests.post(url, data=payload_str, headers=headers, timeout=15)
         result = resp.json()
         if result.get('code') == 1100 and result.get('detail', {}).get('deviceId'):
-            return 'B' + result['detail']['deviceId']
+            device_id = 'B' + result['detail']['deviceId']
+            return device_id
         else:
             print(f'获取deviceId失败: {result}')
     except Exception as e:
         print(f'获取deviceId异常: {e}')
     return None
 
-
 cloud_file_dummy_content = b'0'
 cloud_file_dummy_hash = hashlib.sha256(cloud_file_dummy_content).hexdigest()
-AI_CAMERA_SAMPLE_BASE64 = "data:image/jpg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAkGBxAQEBUQEBAVFRUVFRUVFRUVFRUVFRUVFRUWFhUVFRUYHSggGBolHRUVITEhJSkrLi4uFx8zODMsNygtLisBCgoKDg0OGhAQGi0lHyUtLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLf/AABEIAAEAAQMBIgACEQEDEQH/xAAXAAEBAQEAAAAAAAAAAAAAAAAAAQID/8QAFhEBAQEAAAAAAAAAAAAAAAAAABEh/9oADAMBAAIQAxAAAAHhAH//xAAZEAEBAQEBAQAAAAAAAAAAAAABEQIhMUH/2gAIAQEAAT8A2M4Kxqf/xAAWEQEBAQAAAAAAAAAAAAAAAAAAESH/2gAIAQIBAT8Ap//EABYRAQEBAAAAAAAAAAAAAAAAAAABEf/aAAgBAwEBPwCf/9k="
 
-V3_UPLOAD_TASK_IDS = {106, 110, 113, 319, 409, 431, 604, 1003, 1005, 1017, 1055}
-V3_PHOTO_TASK_IDS = {614, 615, 1080, 1081}
-V3_AICAMERA_TASK_IDS = {585, 616, 618, 1082, 1084}
-V3_MULTIRound_TASK_IDS = V3_UPLOAD_TASK_IDS | V3_PHOTO_TASK_IDS | V3_AICAMERA_TASK_IDS | {609, 617, 1083, 522}
+TOKEN_VALID_TIME = 21600000
+TOKEN_REFRESH_ADVANCE = 24 * 60 * 60 * 1000
+TOKEN_REFRESH_COOLDOWN = 864000
+FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000
+REFRESH_TOKEN_AES_KEY = 'c7lXOigXahPnTViq'
+AI_TOOL_ACCOUNT_AES_KEY = 'xuL97!x7GGxG%8V4'
+AI_TOOL_ACCOUNT_AES_IV = '5OuCxk4XNu0NA*%x'
+TOKEN_EXPIRE_SECONDS_FALLBACK = 2592000
+RED_PACKET_SOURCE_ID = '001216'
+RED_PACKET_VERSION = 'SYS_CONFIG_Y'
+RED_PACKET_BASE_URL = 'https://cpactiv.buy.139.com/cloudphone-market'
+RED_PACKET_PAGE_URL = 'https://cpactiv.buy.139.com/#/redEnvelopeParty/home?channelSrc=red-cmccapp'
+RED_PACKET_APP_ID = '12345681'
+RED_PACKET_SIGN_KEY = 'e10adc3949ba59abbe56e057f20f883e'
+RED_PACKET_CHANNEL_SRC = 'red-cmccapp'
+RED_PACKET_BROWSE_TASKS = {'NOVICE_2', 'NOVICE_3', 'MONTHLY_1'}
+RED_PACKET_DIRECT_TASKS = {'MONTHLY_4', 'MONTHLY_5'}
+RED_PACKET_KNOWN_ANSWERS = {
+    '如何查看并更新移动云手机客户端最新版本？': '进入"我的"-点击"关于云手机"-点击"检查新版本"',
+    '移动云手机可领取定向流量，每月赠送的定向流量是（  ）。': '30GB',
+    '移动云手机端内订购的专业版分辨率已升级到1080P，该说法是否正确？': '正确',
+    '移动云手机支持视频录制，该说法是否正确？': '正确',
+    '云手机支持通过手机、平板、电脑等多种终端设备登录使用，该说法是否正确？': '正确',
+    '使用中国移动号码登录移动云手机，是否支持手机号一键登录？': '支持',
+    '只有中国移动运营商号码能使用移动云手机？': '不正确',
+    '移动云手机是否需要充电使用？': '不需要',
+    '移动云手机支持截图，该说法是否正确？': '正确',
+    '移动云手机AI灵犀助手已接入DeepSeek，是否正确？': '正确',
+    '移动云手机内支持画面清晰度切换，该说法是否正确？': '正确',
+    '移动云手机支持连接蓝牙使用吗？': '不支持',
+    '在云手机内安装游戏应用是否占本地手机存储空间？': '否，不占本地空间',
+    '如何更换云机内的桌面主题或壁纸？': '云机内-【设置】-壁纸/个性主题',
+    '如何将云手机里的应用添加至本地手机桌面？': '云手机桌面-长按应用-发送图标到本地',
+}
+RED_PACKET_MANUAL_TASKS = {
+    'NOVICE_1': '需跳转领取定向流量',
+}
 
 err_accounts = ''
 all_logs = ''
@@ -202,6 +237,31 @@ def generate_uuid():
         random.choice('89ab'), random_string(3), '-',
         random_string(12)
     ])
+
+
+def aes_encrypt(data, key):
+    if AES is None or pad is None:
+        raise ImportError('未安装 pycryptodome，无法执行加密')
+    key_bytes = key.encode('utf-8')
+    if not isinstance(data, str):
+        data = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+    cipher = AES.new(key_bytes, AES.MODE_ECB)
+    encrypted = cipher.encrypt(pad(data.encode('utf-8'), AES.block_size))
+    return base64.b64encode(encrypted).decode('utf-8')
+
+
+def extract_raw_token(token, account):
+    token = normalize_authorization(token)
+    if token.startswith('Basic '):
+        token = token[6:]
+    try:
+        decoded = base64.b64decode(token).decode('utf-8')
+        parts = decoded.split(':')
+        if len(parts) >= 3:
+            return parts[2]
+    except Exception:
+        pass
+    return token
 
 
 def parse_token_key(authorization):
@@ -241,18 +301,14 @@ def build_authorization(account, raw_token):
     return f"Basic {base64.b64encode(f'mobile:{account}:{raw_token}'.encode()).decode()}"
 
 
-def extract_raw_token(token, account=''):
-    token = normalize_authorization(token)
-    if token.startswith('Basic '):
-        token = token[6:]
+def parse_expire_time_to_millis(expire_time):
     try:
-        decoded = base64.b64decode(token).decode('utf-8')
-        parts = decoded.split(':')
-        if len(parts) >= 3:
-            return parts[2]
-    except Exception:
-        pass
-    return token
+        expire_seconds = int(float(expire_time))
+    except (TypeError, ValueError):
+        expire_seconds = TOKEN_EXPIRE_SECONDS_FALLBACK
+    if expire_seconds <= 0:
+        expire_seconds = TOKEN_EXPIRE_SECONDS_FALLBACK
+    return current_millis() + expire_seconds * 1000
 
 
 def get_env_device_id():
@@ -280,12 +336,17 @@ def build_x_device_info(device_id, net_type='wifi', terminal_type='8',
 
 
 def get_storage_base_dir():
-    custom_storage_dir = (os.environ.get('yunpan_storage_dir') or os.environ.get('YDYP_STORAGE_DIR') or '').strip()
+    custom_storage_dir = (os.environ.get('MCLD_DATA_DIR')
+                          or os.environ.get('yunpan_storage_dir')
+                          or os.environ.get('YDYP_STORAGE_DIR') or '').strip()
     if custom_storage_dir:
         base_dir = Path(custom_storage_dir)
     else:
         base_dir = Path(path.abspath(path.dirname(__file__)))
-    base_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        base_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     return base_dir
 
 
@@ -295,7 +356,7 @@ def get_storage_file_path(filename):
 
 def get_js_cache_path():
     try:
-        return Path(os.getcwd()) / JS_CACHE_DIR / JS_CACHE_FILE
+        return get_storage_base_dir() / JS_CACHE_DIR / JS_CACHE_FILE
     except Exception:
         return get_storage_base_dir() / JS_CACHE_FILE
 
@@ -357,10 +418,6 @@ def get_js_cached_token(account):
     return normalize_authorization(entry.get('token', ''))
 
 
-def save_token_info(account, token, expires_at, last_refresh_at):
-    update_cache_authorization(account, token)
-
-
 def get_device_id_storage_path():
     return get_storage_file_path(DEVICE_ID_STORAGE_FILENAME)
 
@@ -390,14 +447,21 @@ def save_device_id(device_id, account):
         print(f'保存deviceId失败: {e}')
 
 
-def ensure_account_storage_entry(account):
+def save_token_info(account, token, expires_at, last_refresh_at):
+    update_cache_authorization(account, token)
+
+
+def ensure_account_storage_entry(account, token=''):
     storage_path = get_device_id_storage_path()
     data = load_device_id_storage()
     account_data = data.get(account)
     if not isinstance(account_data, dict):
         account_data = {}
-    if 'deviceId' not in account_data or account not in data:
-        account_data.setdefault('deviceId', '')
+    changed = False
+    if 'deviceId' not in account_data:
+        account_data['deviceId'] = ''
+        changed = True
+    if changed or account not in data:
         data[account] = account_data
         try:
             with open(storage_path, 'w', encoding='utf-8') as f:
@@ -412,6 +476,11 @@ def get_device_id(account):
     return account_data.get('deviceId', '')
 
 
+def print_startup_info(account_count):
+    print(f"移动云盘自动签到 v{SCRIPT_VERSION}")
+    print(f"移动云盘共获取到{account_count}个账号")
+
+
 def print_device_id_notice():
     if get_env_device_id():
         print("已检测到 yunpan_device_id，将优先使用环境变量 deviceId")
@@ -420,22 +489,32 @@ def print_device_id_notice():
     cached_accounts = [account for account, info in cached_data.items()
                        if isinstance(info, dict) and info.get('deviceId')]
     if cached_accounts:
-        print(f"已发现本地缓存 deviceId {len(cached_accounts)} 个账号")
+        print(f"已发现本地缓存 deviceId {len(cached_accounts)} 个账号；新账号将自动写入 yunpan_device_ids.json")
         return
-    print("未检测到 yunpan_device_id；将自动生成并保存 deviceId")
+    print("未检测到 yunpan_device_id；脚本将优先读取本地缓存，缓存为空时自动生成并保存 deviceId")
 
 
-def send_notification(title, content):
-    tg_token = (os.getenv('TG_BOT_TOKEN') or '').strip()
-    tg_chat = (os.getenv('TG_CHAT_ID') or '').strip()
-    if tg_token and tg_chat:
+def print_storage_path_notice():
+    print(f"缓存文件目录: {get_storage_base_dir()}")
+    print(f"deviceId缓存文件: {get_device_id_storage_path()}")
+    print(f"Token缓存文件（与JS共用）: {get_js_cache_path()}")
+
+
+def load_send():
+    cur_path = path.abspath(path.dirname(__file__))
+    notify_file = cur_path + "/notify.py"
+
+    if path.exists(notify_file):
         try:
-            requests.post(f'https://api.telegram.org/bot{tg_token}/sendMessage',
-                          json={'chat_id': tg_chat, 'text': f'{title}\n\n{content}'}, timeout=10)
-        except Exception as e:
-            print(f'Telegram通知失败: {e}')
+            from notify import send
+            print("加载通知服务成功！")
+            return send
+        except ImportError:
+            print("加载通知服务失败~")
     else:
-        print('未配置 TG_BOT_TOKEN / TG_CHAT_ID，跳过推送')
+        print("加载通知服务失败~")
+
+    return False
 
 
 class YP:
@@ -445,7 +524,9 @@ class YP:
             self.note_token = None
             self.note_auth = None
             self.auth_token = None
-            self.client_version = '13.2.2'
+            self.click_num = 15
+            self.draw = 1
+            self.client_version = '13.0.0'
             self.market_base_url = 'https://m.mcloud.139.com'
             self.market_source_id = '1097'
             self.sso_token = None
@@ -457,25 +538,49 @@ class YP:
             self.market_device_is_placeholder = False
             self.market_headers = {}
             self.market_cookies = {}
+            self.red_packet_token = ''
+            self.red_packet_mobile = ''
             self.session = requests.Session()
             self.user_log_lines = []
+            self.cloud_total = 0
+            self.cloud_received = 0
+            self.signin_ok = False
+            self.login_ok = False
+
             self.timestamp = str(int(round(time.time() * 1000)))
             self.cookies = {'sensors_stay_time': self.timestamp}
+
             parts = cookie.split("#")
             if len(parts) < 2:
                 raise ValueError(f"⚠️ 变量值格式错误: {cookie}")
+
             self.Authorization = normalize_authorization(parts[0])
             self.account = parts[1].strip()
-            self.nickname = parts[2].strip() if len(parts) > 2 else ''
-            self.display_name = self.nickname if self.nickname else '未命名账号'
+            self.refresh_capable = AES is not None and pad is not None
             self.load_persisted_authorization()
             self.load_or_create_market_device_profile()
             self.auth_token = extract_raw_token(self.Authorization, self.account)
+
+            if len(self.account) >= 11:
+                self.encrypt_account = self.account[:3] + "****" + self.account[-4:]
+            else:
+                self.encrypt_account = self.account
+
+            self.fruit_url = 'https://happy.mail.10086.cn/jsp/cn/garden/'
+
             self.jwtHeaders = {
                 'User-Agent': ua,
                 'Accept': '*/*',
                 'Host': 'caiyun.feixin.10086.cn:7071',
             }
+            self.treeHeaders = {
+                'Host': 'happy.mail.10086.cn',
+                'Accept': 'application/json, text/plain, */*',
+                'User-Agent': ua,
+                'Referer': 'https://happy.mail.10086.cn/jsp/cn/garden/wap/index.html?sourceid=1003',
+                'Cookie': '',
+            }
+
         except Exception as e:
             print(f"{e}")
             self.Authorization = None
@@ -489,6 +594,8 @@ class YP:
                 'expiresAt': entry.get('expireAt', 0),
                 'lastRefreshAt': entry.get('updatedAt', 0),
                 'userDomainId': entry.get('userDomainId', ''),
+                'redPacketToken': entry.get('redPacketToken', ''),
+                'redPacketMobile': entry.get('redPacketMobile', ''),
             }
         return {}
 
@@ -537,46 +644,19 @@ class YP:
         except Exception:
             return str(expire_at)
 
-    def save_authorization_record(self, token=None, user_domain_id=None):
-        token = normalize_authorization(token or self.Authorization)
-        update_cache_authorization(self.account, token)
-        uid = user_domain_id or self.user_domain_id
-        if uid:
-            cache = load_js_cache()
-            entry = cache.setdefault('accounts', {}).setdefault(self.account, {})
-            entry['userDomainId'] = uid
-            save_js_cache(cache)
-
-    def check_authorization_status(self):
-        parsed = parse_token_key(self.Authorization)
-        expire_at = parsed.get('expireAt', 0)
-        if not expire_at:
-            stored = self.get_storage_record()
-            expire_at = int(stored.get('expiresAt') or 0)
-        if not expire_at:
-            self.log('-Authorization过期时间无法解析，到期请手动更新环境变量')
-            return
-        if is_token_expired(expire_at):
-            self.log(f'-Authorization已过期（{self._format_expire(expire_at)}），请手动更新环境变量')
-            return
-        if is_token_expiring_soon(expire_at):
-            days = (expire_at - current_millis()) / 86400000
-            self.log(f'-Authorization将在 {days:.1f} 天后过期，到期请手动更新环境变量')
-            return
-        days = (expire_at - current_millis()) / 86400000
-        self.log(f'-Authorization状态良好（剩余 {days:.1f} 天）')
-
-    def sync_token_storage(self):
-        stored = self.get_storage_record()
-        expires_at = stored.get('expiresAt', current_millis() + TOKEN_VALID_TIME)
-        last_refresh_at = stored.get('lastRefreshAt', 0)
-        save_token_info(self.account, self.Authorization, expires_at, last_refresh_at)
-        if self.market_device_id and not self.market_device_is_placeholder:
-            save_device_id(self.market_device_id, self.account)
-        self.save_authorization_record(token=self.Authorization, user_domain_id=self.user_domain_id)
-
     def load_or_create_market_device_profile(self):
-        ensure_account_storage_entry(self.account)
+        ensure_account_storage_entry(self.account, self.Authorization)
+
+        fetched_id = fetch_device_id()
+        if fetched_id:
+            self.market_device_id = fetched_id
+            self.market_device_cookie_value = fetched_id
+            self.market_x_device_info = build_x_device_info(fetched_id)
+            self.market_device_from_env = False
+            self.market_device_is_placeholder = False
+            save_device_id(fetched_id, self.account)
+            return
+
         env_device_id = get_env_device_id()
         if env_device_id:
             device_id, cookie_value = normalize_market_device_input(env_device_id)
@@ -586,30 +666,121 @@ class YP:
             self.market_device_from_env = True
             self.market_device_is_placeholder = False
             return
+
         stored_device_id = get_device_id(self.account)
         if stored_device_id:
             device_id, cookie_value = normalize_market_device_input(stored_device_id)
             self.market_device_id = device_id
             self.market_device_cookie_value = cookie_value
             self.market_x_device_info = build_x_device_info(device_id)
-            self.market_device_from_env = False
             self.market_device_is_placeholder = False
             return
-        fetched_id = fetch_device_id()
-        if fetched_id:
-            device_id, cookie_value = normalize_market_device_input(fetched_id)
-            self.market_device_id = device_id
-            self.market_device_cookie_value = cookie_value
-            self.market_x_device_info = build_x_device_info(device_id)
-            self.market_device_from_env = False
-            self.market_device_is_placeholder = False
-            save_device_id(device_id, self.account)
-            return
-        self.market_device_id = str(uuid.uuid4()).replace('-', '')
-        self.market_device_is_placeholder = True
+
+        self.market_device_id = fetched_id or ''
+        if not self.market_device_id:
+            self.market_device_id = str(uuid.uuid4()).replace('-', '')
+            self.market_device_is_placeholder = True
         _, self.market_device_cookie_value = normalize_market_device_input(self.market_device_id)
         self.market_x_device_info = build_x_device_info(self.market_device_id)
-        save_device_id(self.market_device_id, self.account)
+        if self.market_device_id:
+            save_device_id(self.market_device_id, self.account)
+
+    def save_authorization_record(self, token=None, user_domain_id=None, refreshed=False, expires_at=None):
+        token = normalize_authorization(token or self.Authorization)
+        update_cache_authorization(self.account, token)
+        uid = user_domain_id or self.user_domain_id
+        if uid:
+            cache = load_js_cache()
+            entry = cache.setdefault('accounts', {}).setdefault(self.account, {})
+            entry['userDomainId'] = uid
+            save_js_cache(cache)
+
+    def should_refresh_authorization(self, force=False):
+        if force:
+            return True, '强制刷新'
+
+        parsed = parse_token_key(self.Authorization)
+        expire_at = parsed.get('expireAt', 0)
+
+        if not expire_at:
+            stored = self.get_storage_record()
+            expire_at = int(stored.get('expiresAt') or 0)
+
+        if not expire_at:
+            return True, '无法解析Token过期时间'
+
+        if is_token_expired(expire_at):
+            return True, 'Token已过期'
+
+        if is_token_expiring_soon(expire_at):
+            days = (expire_at - current_millis()) / 86400000
+            return True, f'将在 {days:.1f} 天后过期'
+
+        days = (expire_at - current_millis()) / 86400000
+        return False, f'Token 状态良好（剩余 {days:.1f} 天）'
+
+    def refresh_authorization_token(self, force=False):
+        need_refresh, reason = self.should_refresh_authorization(force=force)
+        if not need_refresh:
+            self.log(f'-Authorization状态: {reason}')
+            return True
+        if not self.refresh_capable:
+            self.log('-未安装 pycryptodome，跳过Authorization自动刷新')
+            return True
+
+        refresh_headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': ua,
+            'x-yun-tid': generate_uuid(),
+            'Authorization': self.Authorization,
+            'x-yun-api-version': 'v1',
+            'x-yun-module-type': '100',
+            'x-yun-op-type': '1',
+            'x-yun-app-channel': '10214200',
+            'x-yun-client-info': '||8||||||||||||',
+            'hcy-cool-flag': '1',
+        }
+        stored = self.get_storage_record()
+        if stored.get('userDomainId'):
+            refresh_headers['x-yun-uni'] = stored['userDomainId']
+
+        encrypted_data = aes_encrypt({'phoneNumber': self.account}, REFRESH_TOKEN_AES_KEY)
+        refresh_data = self.request_json('https://user-njs.yun.139.com/user/auth/refreshToken',
+                                         headers=refresh_headers,
+                                         data={'data': encrypted_data},
+                                         method='POST',
+                                         retries=1)
+        if not refresh_data:
+            self.log(f'-Authorization刷新失败: 接口无响应 ({reason})')
+            return True
+        code = str(refresh_data.get('code', ''))
+        data = refresh_data.get('data')
+        success = refresh_data.get('success', False)
+        is_success = (code in ('0', '00', '000', '0000')) or bool(success) or (code.startswith('0') and len(code) <= 4)
+        if not is_success or not isinstance(data, dict):
+            self.log(f"-Authorization刷新失败: {refresh_data.get('message') or refresh_data.get('msg', '未知错误')}")
+            return True
+        raw_token = data.get('token')
+        if not raw_token:
+            self.log('-Authorization刷新失败: 响应缺少token')
+            return True
+        expires_at = parse_expire_time_to_millis(data.get('expireTime'))
+        self.Authorization = build_authorization(self.account, raw_token)
+        self.auth_token = raw_token
+        self.save_authorization_record(token=self.Authorization, refreshed=True, expires_at=expires_at)
+        update_cache_authorization(self.account, self.Authorization)
+        self.log(f'-Authorization自动刷新成功: {reason}')
+        self.log(f"-Authorization有效期: {datetime.fromtimestamp(expires_at / 1000).strftime('%Y-%m-%d %H:%M:%S')}")
+        return True
+
+    def sync_token_storage(self):
+        stored = self.get_storage_record()
+        expires_at = stored.get('expiresAt', current_millis() + TOKEN_VALID_TIME)
+        last_refresh_at = stored.get('lastRefreshAt', 0)
+        save_token_info(self.account, self.Authorization, expires_at, last_refresh_at)
+        if self.market_device_id and not self.market_device_is_placeholder:
+            save_device_id(self.market_device_id, self.account)
+        self.save_authorization_record(token=self.Authorization, user_domain_id=self.user_domain_id)
 
     def log(self, content):
         print(content)
@@ -630,28 +801,48 @@ class YP:
 
     @catch_errors
     def run(self):
-        self.log(f'账号: {self.display_name}')
+        self.log(f'账号: {self.encrypt_account}')
         if self.jwt():
-            self.check_authorization_status()
-            self.signin_status()
-            self.get_tasklist(url='sign_in_3', app_type='cloud_app')
-            self.log(f'\n🔥 热门任务')
-            self.backup_cloud()
-            self.complete_notice_task()
-            self.get_tasklist(url='newsign_139mail', app_type='email_app')
-            self.receive()
+            self.refresh_authorization_token()
+            
+            try:
+                self.signin_status()
+                self.click()
+                self.get_tasklist(url='sign_in_3', app_type='cloud_app')
+                self.log(f'\n📰 公众号任务')
+                self.wxsign()
+                self.shake()
+                self.surplus_num()
+                self.log(f'\n🔥 热门任务')
+                self.backup_cloud()
+                self.complete_notice_task()
+                self.log(f'\n📧 139邮箱任务')
+                self.get_tasklist(url='newsign_139mail', app_type='email_app')
+            except Exception as e:
+                self.log(f'-旧版签到任务执行异常: {e}')
+            
+            try:
+                self.receive()
+                self.red_envelope_party()
+            except Exception as e:
+                self.log(f'-云朵/红包任务异常: {e}')
+                
             self.sync_token_storage()
+
             global all_logs
             user_log_str = "\n".join(self.user_log_lines)
-            all_logs += f"用户【{self.display_name}】日志:\n{user_log_str}\n\n"
+            all_logs += f"用户【{self.encrypt_account}】日志:\n{user_log_str}\n\n"
+
         else:
             global err_accounts
-            err_accounts += f'{self.display_name}\n'
+            err_accounts += f'{self.encrypt_account}\n'
 
     @catch_errors
     def send_request(self, url, headers=None, cookies=None, data=None, json_data=None, params=None, method='GET', debug=None,
-                     retries=5):
+                     retries=3):
+
         debug = debug if debug is not None else GLOBAL_DEBUG
+
         request_headers = dict(headers or {})
         request_cookies = dict(cookies or {})
         if json_data is not None:
@@ -660,18 +851,18 @@ class YP:
             request_args = {'json': data}
         else:
             request_args = {'data': data}
+
         for attempt in range(retries):
             try:
                 response = self.session.request(method, url, params=params, headers=request_headers or None,
-                                                cookies=request_cookies or None, **request_args)
+                                                cookies=request_cookies or None, timeout=15, **request_args)
                 if 400 <= response.status_code < 500:
                     if debug:
                         print(f'\n【{url}】响应状态码: {response.status_code}')
-                        print(f'响应数据:\n{response.text}')
                     return None
                 response.raise_for_status()
                 if debug:
-                    print(f'\n【{url}】响应数据:\n{response.text}')
+                    print(f'\n【{url}】响应数据:\n{response.text[:200]}...')
                 return response
             except requests.HTTPError as e:
                 print(f"请求异常: {e}")
@@ -824,169 +1015,6 @@ class YP:
     def click_task(self, task_id, key='task'):
         return self.request_market_json(f'{self.market_base_url}/ycloud/signin/task/click?key={key}&id={task_id}')
 
-    def get_task_list_v3(self, market_name='sign_in_3'):
-        if market_name not in ('sign_in_3', 'newsign_139mail'):
-            return None
-        self.prepare_signin_center_session(False)
-        data = self.request_market_json(
-            f'{self.market_base_url}/ycloud/signin/task/taskListV3',
-            json_body=True, method='POST',
-            headers={'activityId': market_name, 'appVersion': f'{self.client_version}.0'},
-            data={'marketname': market_name, 'client': 0, 'clientVersion': self.client_version},
-            retries=2)
-        if not data or data.get('code') != 0 or not isinstance(data.get('result'), list):
-            return None
-        return data['result']
-
-    def query_task_v3(self, market_name, task_id):
-        tasks = self.get_task_list_v3(market_name)
-        if not tasks:
-            return None
-        for task in tasks:
-            if task.get('id') == task_id:
-                return task
-        return None
-
-    def do_task_post(self, task_id=None):
-        device_id = self.get_market_device_id()
-        if not device_id:
-            self.load_or_create_market_device_profile()
-            device_id = self.get_market_device_id()
-        payload = {'client': 'app', 'deviceId': device_id or ''}
-        if task_id:
-            payload['taskId'] = task_id
-        return self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/doTaskPost',
-                                        json_body=True, method='POST',
-                                        headers={'activityId': 'sign_in_3',
-                                                 'appVersion': f'{self.client_version}.0'},
-                                        data=payload, retries=1)
-
-    def register_task_device(self):
-        resp = self.do_task_post()
-        if resp is None:
-            self.log('任务中心deviceId登记: 接口无响应')
-        elif resp.get('code') != 0:
-            self.log(f"任务中心deviceId登记异常: {resp.get('msg', '未知错误')}")
-
-    def receive_task_reward(self, task_id):
-        return self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/receiveTask',
-                                        params={'taskId': task_id})
-
-    def receive_completed_task_rewards_v3(self, market_name, tasks=None):
-        if tasks is None:
-            tasks = self.get_task_list_v3(market_name) or []
-        for task in tasks:
-            if not isinstance(task, dict):
-                continue
-            if task.get('state') or task.get('status') != 1:
-                continue
-            task_id = task.get('id')
-            task_name = self.strip_task_name(task)
-            res = self.receive_task_reward(task_id)
-            if res and res.get('code') == 0:
-                self.log(f'-领取任务奖励成功: {task_name}({task_id})')
-            else:
-                msg = res.get('msg', '未知错误') if res else '接口无响应'
-                self.log(f'-领取任务奖励失败: {task_name}({task_id}) {msg}')
-            time.sleep(0.3)
-
-    def run_task_list_v3(self, market_name, title):
-        tasks = self.get_task_list_v3(market_name)
-        if tasks is None:
-            return False
-        self.log(title)
-        self.register_task_device()
-        self.receive_completed_task_rewards_v3(market_name, tasks)
-        for task in tasks:
-            if not isinstance(task, dict) or not task.get('id'):
-                continue
-            try:
-                self.handle_v3_task(market_name, task)
-            except Exception as e:
-                self.log(f'-任务处理异常: {self.strip_task_name(task)} {e}')
-            time.sleep(0.5)
-        self.receive_completed_task_rewards_v3(market_name)
-        return True
-
-    def handle_v3_task(self, market_name, task):
-        task_id = task.get('id')
-        task_name = self.strip_task_name(task)
-        if task.get('state') == 'FINISH':
-            print(f'-已完成: {task_name}')
-            return
-        if task_id == 406:
-            self.log(self.format_notice_task_log(task_name, self.get_notice_status()))
-            return
-        if task_id == 478:
-            self.log(f'-去完成: {task_name}')
-            click_data = self.click_task(task_id, 'randomCloudTask') or {}
-            if click_data.get('code') == 0:
-                result = click_data.get('result') or {}
-                num = result.get('num', 0)
-                msg = result.get('msg', '')
-                if num:
-                    self.log(f'-已完成: {task_name} 获得{num}云朵 {msg}')
-                else:
-                    self.log(f'-已完成: {task_name} {msg}')
-            else:
-                self.log(f"-需手动完成: {task_name} {click_data.get('msg', '未知错误')}")
-            return
-        action = None
-        max_rounds = 1
-        if task_id in V3_UPLOAD_TASK_IDS:
-            action = self.updata_file
-            max_rounds = 4 if task_id in V3_MULTIRound_TASK_IDS else 1
-        elif task_id in V3_PHOTO_TASK_IDS:
-            action = self.upload_photo_file
-            max_rounds = 4
-        elif task_id in V3_AICAMERA_TASK_IDS:
-            action = self.complete_ai_camera_task
-            max_rounds = 4
-        elif task_id == 107:
-            action = self.do_note_task
-        elif task_id == 434:
-            action = lambda: self.complete_share_file_task(task)
-        elif task_id == 522:
-            action = lambda: self.complete_monthly_upload_task(task)
-        if action is not None:
-            self.log(f'-去完成: {task_name}')
-            for rnd in range(max_rounds):
-                result = action()
-                if result is False:
-                    break
-                post = self.do_task_post(task_id)
-                if post is not None and post.get('code') != 0:
-                    self.log(f"-任务登记返回异常: {post.get('msg', '未知错误')}")
-                if rnd + 1 >= max_rounds:
-                    break
-                time.sleep(1.5)
-                refreshed = self.query_task_v3(market_name, task_id)
-                if not refreshed or refreshed.get('state') == 'FINISH':
-                    break
-                if refreshed.get('currstep', 0) <= task.get('currstep', 0) \
-                        and refreshed.get('process', 0) <= task.get('process', 0):
-                    break
-                task = refreshed
-            refreshed = self.query_task_v3(market_name, task_id) or task
-            if refreshed.get('state') == 'FINISH':
-                self.log(f'-已完成: {task_name}')
-            else:
-                self.log(f'-已登记任务: {task_name}{self.get_task_progress(refreshed)}')
-            return
-        task_keys = self.get_task_click_keys(task)
-        if task_keys:
-            self.log(f'-去完成: {task_name}')
-            for task_key in task_keys:
-                click_data = self.click_task(task_id, task_key)
-                if click_data and click_data.get('code') == 0:
-                    continue
-                msg = click_data.get('msg', '未知错误') if click_data else '接口无响应'
-                self.log(f'-任务登记失败: {task_name} {msg}')
-                return
-            self.log(f'-已登记任务: {task_name}')
-            return
-        self.log(f'-需手动完成: {task_name}{self.get_task_progress(task)}')
-
     def get_notice_status(self):
         send_data = self.request_json('https://caiyun.feixin.10086.cn/market/msgPushOn/task/status',
                                       headers=self.jwtHeaders) or {}
@@ -1044,11 +1072,11 @@ class YP:
             'Origin': 'https://yun.139.com',
         }
 
-    def create_cloud_file(self, prefix, ext='.txt'):
+    def create_cloud_file(self, prefix):
         beijing_tz = timezone(timedelta(hours=8))
         now = datetime.now(beijing_tz)
         file_size = len(cloud_file_dummy_content)
-        file_name = f"{prefix}{now.strftime('%Y%m%d_%H%M%S')}{ext}"
+        file_name = f"{prefix}{now.strftime('%Y%m%d_%H%M%S')}.txt"
         payload = {
             "contentHash": cloud_file_dummy_hash,
             "contentHashAlgorithm": "SHA256",
@@ -1082,15 +1110,6 @@ class YP:
             "fileId": data.get("fileId"),
             "fileName": data.get("fileName", file_name),
         }
-
-    def upload_photo_file(self):
-        upload_info = self.create_cloud_file('auto_photo_', '.jpg')
-        if not upload_info:
-            self.log('-照片上传失败: 接口无响应')
-            return False
-        self.log(f"-照片上传成功，文件名: {upload_info.get('fileName', '')}")
-        self.cleanup_uploaded_files(upload_info)
-        return True
 
     def list_cloud_root_files(self):
         items = []
@@ -1194,7 +1213,7 @@ class YP:
             msg = result.get('resultDesc') or response.get('message', '未知错误') if response else '接口无响应'
             self.log(f'分享文件失败: {msg}')
             return None
-        return self.query_task_v3('sign_in_3', task.get('id', 434)) or self.query_cloud_task(task.get('id', 434), 'month') or task
+        return self.query_cloud_task(task.get('id', 434), 'month') or task
 
     def build_ai_headers(self, use_client_info=False):
         headers = {
@@ -1225,6 +1244,13 @@ class YP:
         headers['x-DeviceInfo'] = f'||36|{self.client_version}||MI 8|{uuid.uuid4()}||android 10|||||'
         return headers
 
+    def get_ai_camera_sample_base64(self):
+        sample_path = path.join(path.abspath(path.dirname(__file__)), 'assets', 'ai_camera_sample.jpg')
+        if not path.exists(sample_path):
+            return ''
+        with open(sample_path, 'rb') as file:
+            return f"data:image/jpg;base64,{base64.b64encode(file.read()).decode()}"
+
     @staticmethod
     def is_ai_chat_success(text):
         payloads = []
@@ -1248,7 +1274,10 @@ class YP:
         if not self.user_domain_id:
             self.log('AI相机任务失败: 缺少用户信息')
             return False
-        image_data = AI_CAMERA_SAMPLE_BASE64
+        image_data = self.get_ai_camera_sample_base64()
+        if not image_data:
+            self.log('AI相机任务失败: 缺少样图')
+            return False
         recognize_payload = json.dumps({
             'channelId': '101',
             'userId': self.user_domain_id,
@@ -1359,6 +1388,14 @@ class YP:
             return ['task']
         return []
 
+    def get_cloud_task_groups(self):
+        return [
+            ('cloudEmail', '\n📮 联动任务'),
+            ('time', '\n✨ 新版热门任务'),
+            ('day', '\n📆 云盘每日任务'),
+            ('month', '\n📆 云盘每月任务'),
+        ]
+
     def query_cloud_task(self, task_id, group='time'):
         return_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/task/taskListV2',
                                                json_body=True, method='POST', data={
@@ -1386,7 +1423,7 @@ class YP:
                 self.log(f'-继续补上传进度: 当前{current_process}/{target_count}，还需{remaining}次')
             for _ in range(remaining):
                 self.updata_file()
-            refreshed_task = self.query_task_v3('sign_in_3', task.get('id', 522)) or self.query_cloud_task(task.get('id', 522), 'time')
+            refreshed_task = self.query_cloud_task(task.get('id', 522), 'time')
             if not refreshed_task:
                 return False
             refreshed_process = int(refreshed_task.get('process') or 0)
@@ -1399,24 +1436,8 @@ class YP:
         self.log(f'-月上传任务进度: {current_process}/{target_count}')
         return False
 
-    def get_tasklist(self, url, app_type):
-        if url in ('sign_in_3', 'newsign_139mail'):
-            title = '\n📋 云朵中心任务' if app_type == 'cloud_app' else '\n📧 139邮箱任务'
-            if self.run_task_list_v3(url, title + '(V3)'):
-                if app_type == 'cloud_app':
-                    self.claim_revival_reward()
-                    self.claim_multiple_clouds()
-                    self.cleanup_uploaded_files()
-                return
-            if app_type == 'cloud_app':
-                self.log('V3任务列表不可用，回退V2')
-                self.get_cloud_tasklist_v2()
-                return
-        self.get_tasklist_v2_fallback(url, app_type)
-
     def get_cloud_tasklist_v2(self):
-        for group, title in (('cloudEmail', '\n📮 联动任务'), ('time', '\n✨ 新版热门任务'),
-                             ('day', '\n📆 云盘每日任务'), ('month', '\n📆 云盘每月任务')):
+        for group, title in self.get_cloud_task_groups():
             return_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/task/taskListV2',
                                                    json_body=True, method='POST', data={
                 'marketname': 'sign_in_3',
@@ -1485,7 +1506,7 @@ class YP:
                 else:
                     self.log(f'-已完成: {task_name} {msg}')
             else:
-                self.log(f"-需手动完成: {task_name} {click_data.get('msg', '未知错误')}")
+                self.log(f'-需手动完成: {task_name} {click_data.get("msg", "未知错误")}')
             return
         task_keys = self.get_task_click_keys(task)
         if task_keys:
@@ -1497,36 +1518,12 @@ class YP:
                 msg = click_data.get('msg', '未知错误') if click_data else '接口无响应'
                 self.log(f'-任务登记失败: {task_name} {msg}')
                 return
+            if task_id == 585 and self.complete_ai_camera_task():
+                self.log(f'-已完成: {task_name}')
+                return
             self.log(f'-已登记任务: {task_name}')
             return
         self.log(f'-需手动完成: {task_name}{self.get_task_progress(task)}')
-
-    def get_tasklist_v2_fallback(self, url, app_type):
-        req_url = f'https://caiyun.feixin.10086.cn/market/signin/task/taskList?marketname={url}'
-        return_data = self.send_request(req_url, headers=self.jwtHeaders, cookies=self.cookies).json()
-        self.sleep()
-        task_list = return_data.get('result', {})
-        try:
-            for task_type, tasks in task_list.items():
-                if task_type in ["new", "hidden", "hiddenabc"]:
-                    continue
-                if app_type == 'email_app':
-                    if task_type == "month":
-                        self.log('\n📆 139邮箱每月任务')
-                        for month in tasks:
-                            task_id = month.get('id')
-                            task_name = re.sub(r'<[^>]+>', '', month.get('name', ''))
-                            task_status = month.get('state', '')
-                            if task_id in [1004, 1005, 1015, 1020]:
-                                continue
-                            if task_status == 'FINISH':
-                                print(f'-已完成: {task_name}')
-                                continue
-                            self.log(f'-去完成: {task_name}')
-                            self.do_task(task_id, task_type='month', app_type='email_app')
-                            time.sleep(2)
-        except Exception as e:
-            self.log(f'获取任务列表错误:{e}')
 
     def claim_revival_reward(self):
         try:
@@ -1543,7 +1540,7 @@ class YP:
                 else:
                     self.log('-云朵复活卡: 暂无奖励可领')
             else:
-                self.log(f"-云朵复活卡: {data.get('msg', '未知错误')}")
+                self.log(f'-云朵复活卡: {data.get("msg", "未知错误")}')
         except Exception as e:
             self.log(f'-云朵复活卡失败: {e}')
 
@@ -1595,24 +1592,16 @@ class YP:
             return None
 
     def jwt(self):
-        token = self.sso()
-        if token is not None:
-            jwt_url = f"https://caiyun.feixin.10086.cn:7071/portal/auth/tyrzLogin.action?ssoToken={token}"
-            jwt_data = self.request_json(jwt_url, headers=self.jwtHeaders, method='POST')
-            if not jwt_data:
-                self.log('JWT获取失败: 接口无响应')
-                return False
-            if jwt_data['code'] != 0:
-                self.log(f"JWT获取失败: {jwt_data['msg']}")
-                return False
-            jwt_token = jwt_data['result']['token']
-            self.jwtHeaders['jwtToken'] = jwt_token
-            self.cookies['jwtToken'] = jwt_token
-            self.build_market_context(jwt_token)
-            return True
-        else:
-            self.log('-ck可能失效了')
-            return False
+        self.log('-已跳过旧版 JWT 获取流程，将直接使用配置的 Authorization 进行鉴权')
+        
+        self.jwtHeaders['jwtToken'] = 'dummy_jwt_token' 
+        self.cookies['jwtToken'] = 'dummy_jwt_token'
+        
+        stored = self.get_storage_record()
+        self.user_domain_id = stored.get('userDomainId', '')
+        
+        self.login_ok = True
+        return True
 
     @catch_errors
     def signin_status(self):
@@ -1626,6 +1615,7 @@ class YP:
             self.log(f"查询签到失败: {check_data.get('msg', '未知错误')}")
             return
         if self.get_today_sign_state(check_data.get('result', {})):
+            self.signin_ok = True
             self.log('✅已签到')
             return
         self.sleep(1, 2)
@@ -1635,14 +1625,33 @@ class YP:
             self.log('签到失败: 接口无响应')
             return
         if signin_data.get('code') == 0 and self.get_today_sign_state(signin_data.get('result', {})):
+            self.signin_ok = True
             self.log('✅签到成功')
             return
         self.sleep(1, 2)
         latest_data = self.request_market_json(check_url, params={'client': 'app'})
         if latest_data and latest_data.get('code') == 0 and self.get_today_sign_state(latest_data.get('result', {})):
+            self.signin_ok = True
             self.log('✅签到成功')
             return
         self.log(f"签到失败: {signin_data.get('msg', '未知错误')}")
+
+    def click(self):
+        successful_click = 0
+
+        try:
+            for _ in range(self.click_num):
+                return_data = self.click_task(319) or {}
+                time.sleep(0.2)
+
+                if 'result' in return_data:
+                    self.log(f'✅戳一戳: {return_data["result"]}')
+                    successful_click += 1
+
+            if successful_click == 0:
+                print(f'❌戳一戳: 未获得 x {self.click_num}')
+        except Exception as e:
+            print(f'错误信息:{e}')
 
     @catch_errors
     def refresh_notetoken(self):
@@ -1663,49 +1672,78 @@ class YP:
             'Content-Type': 'application/json; charset=UTF-8',
             'Accept-Encoding': 'gzip'
         }
+
         try:
             response = self.send_request(note_url, headers=note_headers, data=note_payload, method="POST")
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             print('出错了:', e)
             return
+
         self.note_token = response.headers.get('NOTE_TOKEN')
         self.note_auth = response.headers.get('APP_AUTH')
 
-    def do_note_task(self):
-        self.refresh_notetoken()
-        if not self.note_auth or not self.note_token:
-            self.log('笔记任务失败: 笔记token获取失败')
-            return False
-        note_url = 'http://mnote.caiyun.feixin.10086.cn/noteServer/api/syncNotebookV3.do'
-        headers = {
-            'X-Tingyun-Id': 'p35OnrDoP8k;c=2;r=1122634489;u=43ee994e8c3a6057970124db00b2442c::8B3D3F05462B6E4C',
-            'Charset': 'UTF-8',
-            'Connection': 'Keep-Alive',
-            'User-Agent': 'mobile',
-            'APP_CP': 'android',
-            'CP_VERSION': '3.2.0',
-            'x-huawei-channelsrc': '10001400',
-            'APP_NUMBER': self.account,
-            'APP_AUTH': self.note_auth,
-            'NOTE_TOKEN': self.note_token,
-            'Host': 'mnote.caiyun.feixin.10086.cn',
-            'Content-Type': 'application/json; charset=UTF-8',
-            'Accept': '*/*'
-        }
-        payload = {
-            "addNotebooks": [],
-            "delNotebooks": [],
-            "notebookRefs": [],
-            "updateNotebooks": []
-        }
-        return_data = self.send_request(url=note_url, headers=headers, data=payload, method='POST').json()
-        if return_data is None:
-            self.log('笔记任务失败: 出错了')
-            return False
-        self.notebook_id = return_data['notebooks'][0]['notebookId']
-        self.create_note(headers)
-        return True
+    def get_tasklist(self, url, app_type):
+        if url == 'sign_in_3' and app_type == 'cloud_app':
+            self.get_cloud_tasklist_v2()
+            return
+        url = f'https://caiyun.feixin.10086.cn/market/signin/task/taskList?marketname={url}'
+        return_data = self.send_request(url, headers=self.jwtHeaders, cookies=self.cookies).json()
+        self.sleep()
+        task_list = return_data.get('result', {})
+
+        try:
+            for task_type, tasks in task_list.items():
+                if task_type in ["new", "hidden", "hiddenabc"]:
+                    continue
+                if app_type == 'cloud_app':
+                    if task_type == "month":
+                        self.log('\n📆 云盘每月任务')
+                        for month in tasks:
+                            task_id = month.get('id')
+                            if task_id in [110, 113, 417, 409]:
+                                continue
+                            task_name = re.sub(r'<[^>]+>', '', month.get('name', ''))
+                            task_status = month.get('state', '')
+
+                            if task_status == 'FINISH':
+                                print(f'-已完成: {task_name}')
+                                continue
+                            self.log(f'-去完成: {task_name}')
+                            self.do_task(task_id, task_type='month', app_type='cloud_app')
+                            time.sleep(2)
+                    elif task_type == "day":
+                        self.log('\n📆 云盘每日任务')
+                        for day in tasks:
+                            task_id = day.get('id')
+                            if task_id == 404:
+                                continue
+                            task_name = re.sub(r'<[^>]+>', '', day.get('name', ''))
+                            task_status = day.get('state', '')
+
+                            if task_status == 'FINISH':
+                                print(f'-已完成: {task_name}')
+                                continue
+                            self.log(f'-去完成: {task_name}')
+                            self.do_task(task_id, task_type='day', app_type='cloud_app')
+                elif app_type == 'email_app':
+                    if task_type == "month":
+                        self.log('\n📆 139邮箱每月任务')
+                        for month in tasks:
+                            task_id = month.get('id')
+                            task_name = re.sub(r'<[^>]+>', '', month.get('name', ''))
+                            task_status = month.get('state', '')
+                            if task_id in [1004, 1005, 1015, 1020]:
+                                continue
+
+                            if task_status == 'FINISH':
+                                print(f'-已完成: {task_name}')
+                                continue
+                            self.log(f'-去完成: {task_name}')
+                            self.do_task(task_id, task_type='month', app_type='email_app')
+                            time.sleep(2)
+        except Exception as e:
+            self.log(f'获取任务列表错误:{e}')
 
     @catch_errors
     def do_task(self, task_id, task_type, app_type):
@@ -1715,22 +1753,58 @@ class YP:
         else:
             task_url = f'https://caiyun.feixin.10086.cn/market/signin/task/click?key=task&id={task_id}'
             self.send_request(task_url, headers=self.jwtHeaders, cookies=self.cookies)
-        if app_type == 'cloud_app' and task_type == 'day':
-            if task_id == 106:
-                self.log('-开始上传文件，默认0kb')
-                self.updata_file()
-            elif task_id == 107:
-                self.do_note_task()
+
+        if app_type == 'cloud_app':
+            if task_type == 'day':
+                if task_id == 106:
+                    self.log('-开始上传文件，默认0kb')
+                    self.updata_file()
+                elif task_id == 107:
+                    self.refresh_notetoken()
+                    print('-获取默认笔记id')
+                    note_url = 'http://mnote.caiyun.feixin.10086.cn/noteServer/api/syncNotebookV3.do'
+                    headers = {
+                        'X-Tingyun-Id': 'p35OnrDoP8k;c=2;r=1122634489;u=43ee994e8c3a6057970124db00b2442c::8B3D3F05462B6E4C',
+                        'Charset': 'UTF-8',
+                        'Connection': 'Keep-Alive',
+                        'User-Agent': 'mobile',
+                        'APP_CP': 'android',
+                        'CP_VERSION': '3.2.0',
+                        'x-huawei-channelsrc': '10001400',
+                        'APP_NUMBER': self.account,
+                        'APP_AUTH': self.note_auth,
+                        'NOTE_TOKEN': self.note_token,
+                        'Host': 'mnote.caiyun.feixin.10086.cn',
+                        'Content-Type': 'application/json; charset=UTF-8',
+                        'Accept': '*/*'
+                    }
+                    payload = {
+                        "addNotebooks": [],
+                        "delNotebooks": [],
+                        "notebookRefs": [],
+                        "updateNotebooks": []
+                    }
+                    return_data = self.send_request(url=note_url, headers=headers, data=payload,
+                                                    method='POST').json()
+                    if return_data is None:
+                        return print('出错了')
+                    self.notebook_id = return_data['notebooks'][0]['notebookId']
+                    print('开始创建笔记')
+                    self.create_note(headers)
+            elif task_type == 'month':
+                pass
+        elif app_type == 'email_app':
+            if task_type == 'month':
+                pass
 
     @catch_errors
     def updata_file(self):
         upload_info = self.create_cloud_file('auto_upload_')
         if not upload_info:
             self.log('-上传失败: 接口无响应')
-            return False
+            return
         self.log(f"-上传文件成功，文件名: {upload_info.get('fileName', '')}")
         self.cleanup_uploaded_files(upload_info)
-        return True
 
     def create_note(self, headers):
         note_id = self.get_note_id(32)
@@ -1796,8 +1870,155 @@ class YP:
         return note_id
 
     @catch_errors
+    def wxsign(self):
+        self.sleep()
+        url = 'https://caiyun.feixin.10086.cn/market/playoffic/followSignInfo?isWx=true'
+        resp = self.send_request(url, headers=self.jwtHeaders, cookies=self.cookies)
+        if resp is None:
+            self.log('公众号任务: 接口无响应，跳过')
+            return
+        return_data = resp.json()
+
+        if return_data['msg'] != 'success':
+            return self.log(return_data['msg'])
+        if not return_data['result'].get('todaySignIn'):
+            return self.log('❌签到失败,可能未绑定公众号')
+        return self.log('✅公众号签到成功')
+
+    def shake(self):
+        url = "https://caiyun.feixin.10086.cn:7071/market/shake-server/shake/shakeIt?flag=1"
+        successful_shakes = 0
+        aborted = False
+
+        try:
+            for _ in range(self.click_num):
+                resp = self.send_request(url=url, cookies=self.cookies, headers=self.jwtHeaders,
+                                        method='POST')
+                if resp is None:
+                    self.log('摇一摇: 接口无响应（活动可能已结束），跳过')
+                    aborted = True
+                    break
+                return_data = resp.json()
+                time.sleep(1)
+                shake_prize_config = return_data["result"].get("shakePrizeconfig")
+
+                if shake_prize_config:
+                    self.log(f"🎉摇一摇获得: {shake_prize_config['name']}")
+                    successful_shakes += 1
+        except Exception as e:
+            self.log(f'摇一摇异常: {e}')
+            aborted = True
+        if successful_shakes == 0 and not aborted:
+            self.log(f'❌未摇中 x {self.click_num}')
+
+    @catch_errors
+    def surplus_num(self):
+        self.sleep()
+        draw_info_url = 'https://caiyun.feixin.10086.cn/market/playoffic/drawInfo'
+        draw_url = "https://caiyun.feixin.10086.cn/market/playoffic/draw"
+
+        draw_info_data = self.send_request(draw_info_url, headers=self.jwtHeaders).json()
+
+        if draw_info_data.get('msg') == 'success':
+            remain_num = draw_info_data['result'].get('surplusNumber', 0)
+            self.log(f'剩余抽奖次数{remain_num}')
+            if remain_num > 50 - self.draw:
+                for _ in range(self.draw):
+                    self.sleep()
+                    draw_data = self.send_request(url=draw_url, headers=self.jwtHeaders).json()
+
+                    if draw_data.get("code") == 0:
+                        prize_name = draw_data["result"].get("prizeName", "")
+                        self.log("✅抽奖成功，获得:" + prize_name)
+                    else:
+                        self.log(f"❌抽奖失败: code={draw_data.get('code')} {draw_data.get('msg', '未知原因')}")
+            else:
+                pass
+        else:
+            self.log(f"抽奖查询失败: {draw_info_data.get('msg')}")
+
+    @catch_errors
+    def do_fruit_task(self, task_name, task_id, water_num):
+        self.log(f'-去完成: {task_name}')
+        do_task_url = f'{self.fruit_url}task/doTask.do?taskId={task_id}'
+        do_task_data = self.send_request(do_task_url, headers=self.treeHeaders).json()
+
+        if do_task_data.get('success'):
+            get_water_url = f'{self.fruit_url}task/givenWater.do?taskId={task_id}'
+            get_water_data = self.send_request(get_water_url, headers=self.treeHeaders).json()
+
+            if get_water_data.get('success'):
+                self.log(f'-已完成任务获得水滴: {water_num}')
+            else:
+                self.log(f'❌领取失败: {get_water_data.get("msg", "")}')
+        else:
+            self.log(f'❌参与任务失败: {do_task_data.get("msg", "")}')
+
+    @catch_errors
+    def cloud_game(self):
+        game_info_url = 'https://caiyun.feixin.10086.cn/market/signin/hecheng1T/info?op=info'
+        bigin_url = 'https://caiyun.feixin.10086.cn/market/signin/hecheng1T/beinvite'
+        end_url = 'https://caiyun.feixin.10086.cn/market/signin/hecheng1T/finish?flag=true'
+
+        game_info_data = self.send_request(game_info_url, headers=self.jwtHeaders, cookies=self.cookies).json()
+        if game_info_data and game_info_data.get('code', -1) == 0:
+            currnum = game_info_data.get('result', {}).get('info', {}).get('curr', 0)
+            count = game_info_data.get('result', {}).get('history', {}).get('0', {}).get('count', '')
+            rank = game_info_data.get('result', {}).get('history', {}).get('0', {}).get('rank', '')
+
+            self.log(f'今日剩余游戏次数: {currnum} 合成次数: {count}')
+
+            for _ in range(currnum):
+                self.send_request(bigin_url, headers=self.jwtHeaders, cookies=self.cookies).json()
+                print('-开始游戏,等待10-15秒完成游戏')
+                time.sleep(random.randint(10, 15))
+                end_data = self.send_request(end_url, headers=self.jwtHeaders, cookies=self.cookies).json()
+                if end_data and end_data.get('code', -1) == 0:
+                    self.log('游戏成功')
+        else:
+            print("-获取游戏信息失败")
+
+    def receive_cloud_once(self, method='POST'):
+        return self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/receiveV3',
+                                        params={'client': 'app'},
+                                        headers=self.build_receive_headers(),
+                                        method=method, json_body=True, data={})
+
+    def diagnose_receive(self):
+        url = f'{self.market_base_url}/ycloud/signin/page/receiveV3'
+        headers = self.build_market_headers({
+            'showLoading': 'true',
+            'appVersion': f'{self.client_version}.0',
+            'activityId': 'sign_in_3',
+            'Content-Type': 'application/json;charset=UTF-8',
+        }, referer=self.build_market_page_url())
+        for method in ('POST', 'GET'):
+            try:
+                if method == 'POST':
+                    resp = self.session.post(url, params={'client': 'app'}, headers=headers,
+                                             json={}, cookies=dict(self.market_cookies) or None, timeout=20)
+                else:
+                    resp = self.session.get(url, params={'client': 'app'}, headers=headers,
+                                            cookies=dict(self.market_cookies) or None, timeout=20)
+                body = (resp.text or '').replace('\n', ' ')[:200]
+                self.log(f'-领取诊断[{method}]: HTTP {resp.status_code} {body}')
+            except Exception as e:
+                self.log(f'-领取诊断异常[{method}]: {e}')
+
+    def recheck_pending(self, pending_amount, total_amount):
+        latest_info_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/infoV3',
+                                                    params={'client': 'app'})
+        latest_result = latest_info_data.get('result', {}) if latest_info_data and latest_info_data.get('code') == 0 else {}
+        latest_pending = latest_result.get('toReceive', pending_amount)
+        latest_total = latest_result.get('total', total_amount)
+        pending_delta = pending_amount - latest_pending if isinstance(pending_amount, int) and isinstance(latest_pending, int) else 0
+        total_delta = latest_total - total_amount if isinstance(total_amount, int) and isinstance(latest_total, int) else 0
+        claimed = total_delta or pending_delta or (pending_amount if latest_pending == 0 else 0)
+        return max(0, claimed), latest_total, latest_pending
+
+    @catch_errors
     def receive(self):
-        prize_url = f"https://caiyun.feixin.10086.cn/market/prizeApi/checkPrize/getUserPrizeLogPageV2?currPage=1&pageSize=15&_={self.timestamp}"
+        prize_url = f"https://caiyun.feixin.10086.cn/market/prizeApi/checkPrize/getUserPrizeLogPage?currPage=1&pageSize=15&_={self.timestamp}"
         info_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/infoV3',
                                              params={'client': 'app'})
         if not info_data:
@@ -1806,46 +2027,43 @@ class YP:
         if info_data.get('code') != 0:
             self.log(f"查询云朵失败: {info_data.get('msg', '未知错误')}")
             return
-        info_result = info_data.get('result', {}) or {}
+        info_result = info_data.get('result', {})
         pending_amount = info_result.get('toReceive', 0)
         total_amount = info_result.get('total', '')
-        received_amount = 0
-        device_id = self.get_market_device_id()
-        for item in info_result.get('receiveList') or []:
-            reward_id = item.get('recordId') or item.get('rewardId') or item.get('id')
-            cloud_type = item.get('cloudType', 0)
-            if not reward_id or cloud_type != 0:
-                continue
-            headers = self.build_receive_headers()
-            headers['isDeviceId'] = 'true'
-            headers['Content-Type'] = 'application/json;charset=UTF-8'
-            ack = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/receiveV3',
-                                           headers=headers, json_body=True, method='POST',
-                                           data={'client': 'app', 'cloudId': reward_id,
-                                                 'cloudType': cloud_type,
-                                                 'deviceId': device_id or ''},
-                                           retries=1)
-            if ack and ack.get('code') == 0:
-                ack_result = ack.get('result') or {}
-                received_amount += int(ack_result.get('receive', 0) or 0)
-                total_amount = ack_result.get('total', total_amount)
+        if pending_amount:
+            self.prepare_signin_center_session(for_receive=True)
+            receive_data = self.receive_cloud_once('POST')
+            if receive_data is None:
+                self.diagnose_receive()
+                self.sleep(2, 4)
+                receive_data = self.receive_cloud_once('GET') or self.receive_cloud_once('POST')
+            if receive_data is None:
+                claimed, latest_total, latest_pending = self.recheck_pending(pending_amount, total_amount)
+                if claimed > 0:
+                    self.log(f'-领取云朵:{claimed}云朵')
+                    total_amount = latest_total
+                else:
+                    self.log('领取云朵失败: 接口无响应（已重试一次）')
+                    self.log(f'-当前待领取:{pending_amount}云朵')
+            elif receive_data.get('code') == 0:
+                receive_result = receive_data.get('result', {})
+                self.log(f'-领取云朵:{receive_result.get("receive", pending_amount)}云朵')
+                total_amount = receive_result.get('total', total_amount)
             else:
-                msg = ack.get('msg', '未知错误') if ack else '接口无响应'
-                self.log(f'-领取云朵失败: {msg}')
-            time.sleep(0.5)
-        if received_amount:
-            self.log(f'-领取云朵:{received_amount}云朵')
-        elif pending_amount:
-            self.log(f'-当前待领取:{pending_amount}云朵')
+                claimed_amount, latest_total, latest_pending = self.recheck_pending(pending_amount, total_amount)
+                if claimed_amount > 0:
+                    self.log(f'-领取云朵:{claimed_amount}云朵')
+                    total_amount = latest_total
+                else:
+                    self.log(f"领取云朵失败: {receive_data.get('msg', '未知错误')}")
+                    self.log(f'-当前待领取:{pending_amount}云朵')
         else:
             self.log('-当前待领取:0云朵')
         self.sleep()
         prize_data = self.request_json(prize_url, headers=self.jwtHeaders, cookies=self.cookies) or {}
-        result = prize_data.get('result', {})
-        if isinstance(result, dict):
-            result = result.get('result') or result.get('list') or []
+        result = prize_data.get('result', {}).get('result') or []
         rewards = ''
-        for value in result or []:
+        for value in result:
             prizeName = value.get('prizeName')
             flag = value.get('flag')
             if flag == 1:
@@ -1853,8 +2071,9 @@ class YP:
         self.log(f'-当前云朵数量:{total_amount}云朵')
         if rewards:
             self.log(rewards)
+        self.cloud_total = total_amount if isinstance(total_amount, int) else 0
         global user_amount
-        user_amount += f'用户【{self.display_name}】:{total_amount}云朵\n'
+        user_amount += f'用户【{self.encrypt_account}】:{total_amount}云朵\n'
 
     @catch_errors
     def backup_cloud(self):
@@ -1863,25 +2082,30 @@ class YP:
         state = backup_data.get('result', {}).get('state', '')
         if state == -1:
             self.log('本月未备份,暂无连续备份奖励')
+
         elif state == 0:
             self.log('-领取本月连续备份奖励')
             cur_url = 'https://caiyun.feixin.10086.cn/market/backupgift/receive'
             cur_data = self.send_request(cur_url, headers=self.jwtHeaders).json()
             self.log(f'-获得云朵数量:{cur_data.get("result").get("result")}')
+
         elif state == 1:
             print('-已领取本月连续备份奖励')
         self.sleep()
         expend_url = f'{self.market_base_url}/ycloud/signin/page/taskExpansion'
         expend_data = self.request_market_json(expend_url) or {}
+
         curMonthBackup = expend_data.get('result', {}).get('curMonthBackup', '')
         preMonthBackup = expend_data.get('result', {}).get('preMonthBackup', '')
         curMonthBackupTaskAccept = expend_data.get('result', {}).get('curMonthBackupTaskAccept', '')
         nextMonthTaskRecordCount = expend_data.get('result', {}).get('nextMonthTaskRecordCount', '')
         acceptDate = expend_data.get('result', {}).get('acceptDate', '')
+
         if curMonthBackup:
             self.log(f'- 本月已备份，下月可领取膨胀云朵: {nextMonthTaskRecordCount}')
         else:
             self.log('- 本月还未备份，下月暂无膨胀云朵')
+
         if preMonthBackup:
             if curMonthBackupTaskAccept:
                 print('- 上月已备份，膨胀云朵已领取')
@@ -1903,13 +2127,16 @@ class YP:
         if not notice_status:
             self.log('获取通知任务状态失败')
             return
+
         pushOn = notice_status.get('pushOn', '')
         firstTaskStatus = notice_status.get('firstTaskStatus', '')
         secondTaskStatus = notice_status.get('secondTaskStatus', '')
         onDuaration = notice_status.get('onDuaration', '')
         total = notice_status.get('total', 31)
+
         if pushOn == 1:
             reward_url = 'https://caiyun.feixin.10086.cn/market/msgPushOn/task/obtain'
+
             if firstTaskStatus == 3:
                 print('- 任务1奖励已领取')
             else:
@@ -1917,45 +2144,434 @@ class YP:
                 reward1_data = self.send_request(reward_url, headers=self.jwtHeaders, data={"type": 1},
                                                  method="POST").json()
                 self.log(reward1_data.get('result', {}).get('description', ''))
+
             if secondTaskStatus == 2:
                 self.log('- 领取任务2奖励')
                 reward2_data = self.send_request(reward_url, headers=self.jwtHeaders, data={"type": 2},
                                                  method="POST").json()
                 self.log(reward2_data.get('result', {}).get('description', ''))
+
+            progress = f'{onDuaration}/{total}天'
             self.log(f'- 通知已开启天数: {onDuaration}, 满{total}天可领取奖励')
         else:
             self.log('- 通知权限未开启')
 
+    def login_red_packet(self):
+        token = self.query_spec_token(RED_PACKET_SOURCE_ID)
+        if not token:
+            return False
+        login_url = f'{RED_PACKET_BASE_URL}/ticket/login'
+        import requests as _requests
 
-if __name__ == "__main__":
-    env_name = 'yunpan'
-    token = os.getenv(env_name)
-    if not token:
-        print(f'⛔️未获取到ck变量：请检查变量 {env_name} 是否填写')
-        exit(0)
-    cookies = re.split(r'[&]', token)
-    print(f"共获取到 {len(cookies)} 个账号")
-    print_device_id_notice()
-    for i, account_info in enumerate(cookies, start=1):
-        print(f"\n======== ▷ 第 {i} 个账号 ◁ ========")
-        yp_instance = YP(account_info)
-        if not yp_instance.Authorization:
-            print(f"⛔️ 账号 {i} 无效，跳过执行")
-            continue
-        yp_instance.session.cookies.clear()
-        yp_instance.run()
-        print("\n准备进行下一个账号")
-        time.sleep(random.uniform(1, 3))
-    print("\n================ 运行总结 ================")
-    if err_accounts:
-        print(f"❌ 失效账号:\n{err_accounts}")
-    if user_amount:
-        print(f"☁️ 云朵汇总:\n{user_amount}")
-    msg = ""
-    if err_accounts:
-        msg += f"失效账号:\n{err_accounts}\n"
-    msg += f"任务详情:\n{all_logs}\n"
-    msg += f"云朵汇总:\n{user_amount}"
-    msg = msg.replace('-', ' ').replace('.', ' ').replace('!', '！').replace('(', '（').replace(')', '）')
-    msg = msg.replace('_', ' ').replace('=', ' ').replace('~', ' ').replace('{', ' ').replace('}', ' ').replace('|', ' ')
-    send_notification('中国移动云盘任务信息', msg)
+        def build_headers(user_agent):
+            return {
+                'Content-Type': 'application/json;charset=UTF-8',
+                'User-Agent': user_agent,
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'zh-CN,zh;q=0.9',
+                'Origin': 'https://cpactiv.buy.139.com',
+                'Referer': RED_PACKET_PAGE_URL,
+                'Host': 'cpactiv.buy.139.com',
+                'x-Requested-With': 'com.chinamobile.mcloud',
+                'Connection': 'keep-alive',
+            }
+
+        login_data = None
+        last_status = 0
+        for attempt, user_agent in enumerate((market_ua, ua), start=1):
+            try:
+                resp = _requests.post(login_url, headers=build_headers(user_agent),
+                                      json={'token': token, 'sourceId': RED_PACKET_SOURCE_ID},
+                                      timeout=15)
+                last_status = resp.status_code
+                if resp.status_code == 200:
+                    login_data = resp.json()
+                    break
+                if attempt == 1:
+                    self.sleep(2, 4)
+            except Exception as e:
+                self.log(f'红包派对登录异常: {e}')
+        if login_data is None:
+            if last_status == 404:
+                self.log('红包派对接口返回 404：活动已下线或路径变更，本次跳过（不影响其他任务）')
+            elif last_status == 418:
+                self.log('红包派对被风控拦截（HTTP 418）：建议降低执行频率后重试')
+            elif last_status == 0:
+                self.log('红包派对登录失败: 网络不通')
+            else:
+                self.log(f'红包派对登录失败: HTTP {last_status}')
+            return False
+        if not login_data:
+            self.log('红包派对登录失败: 接口无响应')
+            return False
+        if login_data.get('code') != 0:
+            self.log(f"红包派对登录失败: {login_data.get('msg', '未知错误')}")
+            return False
+        login_result = login_data.get('result') or {}
+        self.red_packet_token = login_result.get('token') or ''
+        self.red_packet_mobile = login_result.get('mobile') or self.account
+        header = login_data.get('header') or {}
+        if str(header.get('status')) == '200':
+            self.market_source_id = RED_PACKET_SOURCE_ID
+            self.build_market_context(login_result.get('jwtToken') or '')
+            self.save_red_packet_token()
+            return True
+        self.log(f"红包派对登录失败: {header.get('respMsg', '未知错误')}")
+        return False
+
+    def load_red_packet_token(self):
+        stored = self.get_storage_record()
+        self.red_packet_token = stored.get('redPacketToken', '')
+        self.red_packet_mobile = stored.get('redPacketMobile', '')
+        return bool(self.red_packet_token)
+
+    def save_red_packet_token(self):
+        cache = load_js_cache()
+        entry = cache.setdefault('accounts', {}).setdefault(self.account, {})
+        entry['redPacketToken'] = self.red_packet_token
+        entry['redPacketMobile'] = self.red_packet_mobile
+        save_js_cache(cache)
+
+    def sign_red_packet(self):
+        if not self.red_packet_mobile:
+            no = self.account
+        else:
+            no = self.red_packet_mobile
+        sign_str = f'{RED_PACKET_SIGN_KEY}mobile{no}'
+        sign = hashlib.md5(sign_str.encode()).hexdigest()
+        data = self.request_market_json(f'{RED_PACKET_BASE_URL}/sign/signBySourceId',
+                                        json_body=True, method='POST', data={
+                'mobile': no,
+                'sign': sign,
+                'sourceId': RED_PACKET_SOURCE_ID,
+                'version': RED_PACKET_VERSION,
+                'channelSrc': RED_PACKET_CHANNEL_SRC,
+            })
+        if not data:
+            return False
+        if data.get('code') == 0:
+            self.log('红包签到成功')
+            return True
+        self.log(f"红包签到失败: {data.get('msg', '未知错误')}")
+        return True
+
+    def get_red_packet_task_list(self):
+        token = self.red_packet_token
+        if not token:
+            return None
+        return self.request_market_json(f'{RED_PACKET_BASE_URL}/taskCenter/task',
+                                        json_body=True, method='POST', data={
+                'appId': RED_PACKET_APP_ID,
+                'sourceId': RED_PACKET_SOURCE_ID,
+                'token': token,
+            })
+
+    def log_red_packet_balance(self):
+        token = self.red_packet_token
+        if not token:
+            return
+        balance_data = self.request_market_json(f'{RED_PACKET_BASE_URL}/taskCenter/balance',
+                                                json_body=True, method='POST', data={
+                'appId': RED_PACKET_APP_ID,
+                'sourceId': RED_PACKET_SOURCE_ID,
+                'token': token,
+            })
+        if not balance_data:
+            return
+        header = balance_data.get('header') or {}
+        if str(header.get('status')) != '200':
+            return
+        result = balance_data.get('data') or {}
+        amount = result.get('amount', 0)
+        self.log(f'-余额: {amount}')
+
+    def handle_red_packet_sign(self, task_list):
+        sign_task = task_list.get('SIGN') or {}
+        if not sign_task:
+            return
+        for task in sign_task:
+            if task.get('state') == 3:
+                continue
+            self.sign_red_packet()
+            return
+
+    def handle_red_packet_task(self, task):
+        task_name = task.get('taskName', '')
+        task_code = task.get('taskCode', '')
+        state = task.get('state', 0)
+        if state == 3:
+            self.log(f'-已完成: {task_name}')
+            return
+        if task_code in RED_PACKET_MANUAL_TASKS:
+            self.log(f'-{RED_PACKET_MANUAL_TASKS[task_code]}: {task_name}')
+            return
+        if state == 0:
+            click_data = self.request_market_json(f'{RED_PACKET_BASE_URL}/taskCenter/click',
+                                                  json_body=True, method='POST', data={
+                    'appId': RED_PACKET_APP_ID,
+                    'sourceId': RED_PACKET_SOURCE_ID,
+                    'token': self.red_packet_token,
+                    'taskCode': task_code,
+                })
+            if not click_data:
+                self.log(f'-操作失败: {task_name}')
+                return
+            header = click_data.get('header') or {}
+            if str(header.get('status')) != '200':
+                self.log(f"-操作失败: {task_name} {header.get('respMsg', '未知错误')}")
+                return
+            done = click_data.get('data') or {}
+            if done.get('state') == 2:
+                self.log(f'-进行中: {task_name}')
+                return
+            return
+        if state == 1:
+            self.log(f'-进行中: {task_name}')
+            return
+        if state == 2:
+            if task_code in RED_PACKET_BROWSE_TASKS:
+                self.log(f'-浏览任务: {task_name} (需跳转活动页)')
+                return
+            if task_code in RED_PACKET_DIRECT_TASKS:
+                complete_data = self.request_market_json(f'{RED_PACKET_BASE_URL}/taskCenter/complete',
+                                                         json_body=True, method='POST', data={
+                        'appId': RED_PACKET_APP_ID,
+                        'sourceId': RED_PACKET_SOURCE_ID,
+                        'token': self.red_packet_token,
+                        'taskCode': task_code,
+                    })
+                if not complete_data:
+                    self.log(f'-完成失败: {task_name}')
+                    return
+                header = complete_data.get('header') or {}
+                if str(header.get('status')) == '200':
+                    self.log(f'-已完成: {task_name}')
+                else:
+                    self.log(f"-完成失败: {task_name} {header.get('respMsg', '未知错误')}")
+                return
+            if task_code.startswith('ANSWER_'):
+                self.do_red_packet_question(task, task_code)
+                return
+            self.log(f'-需手动完成: {task_name}')
+            return
+
+    def get_red_packet_question(self, task):
+        token = self.red_packet_token
+        if not token:
+            return None
+        data = self.request_market_json(f'{RED_PACKET_BASE_URL}/taskCenter/question',
+                                        json_body=True, method='POST', data={
+                'appId': RED_PACKET_APP_ID,
+                'sourceId': RED_PACKET_SOURCE_ID,
+                'token': token,
+                'taskCode': task.get('taskCode', ''),
+            })
+        if not data:
+            return None
+        header = data.get('header') or {}
+        if str(header.get('status')) != '200':
+            return None
+        return data.get('data') or {}
+
+    def do_red_packet_question(self, task, task_code):
+        token = self.red_packet_token
+        if not token:
+            return
+        task_name = task.get('taskName', '')
+        question = self.get_red_packet_question(task)
+        if not question:
+            self.log(f'-获取题目失败: {task_name}')
+            return
+        question_text = question.get('question') or question.get('questionText', '')
+        options = question.get('options') or question.get('questionOptionList') or []
+        answer = RED_PACKET_KNOWN_ANSWERS.get(question_text, '')
+        if not answer and options:
+            answer = options[0].get('optionDesc') or options[0].get('name', '')
+            self.log(f'-未知题目: {question_text}')
+        if not answer:
+            self.log(f'-无答案: {task_name}')
+            return
+        option_id = ''
+        for opt in options:
+            desc = opt.get('optionDesc') or opt.get('name', '')
+            if desc == answer:
+                option_id = opt.get('id') or opt.get('optionId', '')
+                break
+        if not option_id:
+            self.log(f'-找不到选项: {task_name}')
+            return
+        answer_data = self.request_market_json(f'{RED_PACKET_BASE_URL}/taskCenter/answer',
+                                               json_body=True, method='POST', data={
+                'appId': RED_PACKET_APP_ID,
+                'sourceId': RED_PACKET_SOURCE_ID,
+                'token': token,
+                'taskCode': task_code,
+                'optionId': option_id,
+            })
+        if not answer_data:
+            self.log(f'-答题失败: {task_name}')
+            return
+        header = answer_data.get('header') or {}
+        if str(header.get('status')) == '200':
+            self.log(f'-答题成功: {task_name}')
+        else:
+            self.log(f"-答题失败: {task_name} {header.get('respMsg', '未知错误')}")
+
+    @staticmethod
+    def red_packet_task_groups():
+        return [
+            ('SIGN', '签到'),
+            ('NOVICE', '新手任务'),
+            ('DAILY', '每日任务'),
+            ('MONTHLY', '每月任务'),
+        ]
+
+    def red_envelope_party(self):
+        self.log(f'\n🧧 红包派对任务')
+        if not self.login_red_packet():
+            return
+        data = self.get_red_packet_task_list()
+        if not data:
+            self.log('获取红包派对任务失败: 接口无响应')
+            return
+        header = data.get('header') or {}
+        if str(header.get('status')) != '200':
+            self.log(f"获取红包派对任务失败: {header.get('errMsg') or header.get('respMsg') or '未知错误'}")
+            return
+        task_list = data.get('data') or {}
+        self.log_red_packet_balance()
+        self.handle_red_packet_sign(task_list)
+        for group, title in self.red_packet_task_groups():
+            tasks = task_list.get(group) or []
+            if not tasks:
+                continue
+            self.log(title)
+            for task in tasks:
+                self.handle_red_packet_task(task)
+        self.log_red_packet_balance()
+
+def reset_run_state():
+    global err_accounts, all_logs, user_amount
+    err_accounts = ''
+    all_logs = ''
+    user_amount = ''
+
+def split_cookies(raw):
+    parts = re.split(r'[&\n\r;]+', raw or '')
+    return [p.strip() for p in parts if p.strip()]
+
+def mask_phone(phone):
+    phone = (phone or '').strip()
+    if len(phone) >= 11:
+        return phone[:3] + '****' + phone[-4:]
+    return phone or '未知账号'
+
+def parse_account_label(cookie):
+    try:
+        parts = (cookie or '').split('#')
+        if len(parts) >= 2:
+            return parts[1].strip()
+    except Exception:
+        pass
+    return ''
+
+def extract_cloud_received(log_lines):
+    total = 0
+    pattern = re.compile(r'领取云朵[:：]\s*(\d+)')
+    for line in log_lines or []:
+        m = pattern.search(line)
+        if m:
+            try:
+                total += int(m.group(1))
+            except ValueError:
+                pass
+    return total
+
+def run_one(cookie, on_line=None, writer=None):
+    import contextlib
+    import io as _io
+
+    result = {
+        'phone': parse_account_label(cookie),
+        'account': mask_phone(parse_account_label(cookie)),
+        'ok': False,
+        'signin': False,
+        'cloud_total': 0,
+        'cloud_received': 0,
+        'log': '',
+        'error': '',
+    }
+
+    if not cookie or '#' not in cookie:
+        result['error'] = '格式错误，应为 Authorization#手机号'
+        return result
+
+    buffer = _io.StringIO()
+
+    class _Tee(object):
+        def write(self, text):
+            buffer.write(text)
+            if on_line:
+                for line in text.splitlines():
+                    on_line(line)
+            return len(text)
+
+        def flush(self):
+            pass
+
+    target = writer if writer is not None else _Tee()
+    try:
+        with contextlib.redirect_stdout(target):
+            yp = YP(cookie)
+            if not yp.Authorization:
+                result['error'] = '账号初始化失败（Authorization 无效）'
+                return result
+            yp.session.cookies.clear()
+            yp.run()
+    except Exception as e:
+        result['error'] = f'{type(e).__name__}: {e}'
+        return result
+
+    lines = list(getattr(yp, 'user_log_lines', []) or [])
+    raw = buffer.getvalue()
+    if not lines and raw:
+        lines = [l for l in raw.splitlines() if l.strip()]
+
+    result['ok'] = bool(getattr(yp, 'login_ok', False))
+    result['signin'] = bool(getattr(yp, 'signin_ok', False))
+    result['cloud_total'] = getattr(yp, 'cloud_total', 0) or 0
+    result['cloud_received'] = extract_cloud_received(lines)
+    result['log'] = '\n'.join(lines)
+    if not result['ok']:
+        result['error'] = '账号可能已失效（JWT 获取失败）'
+    return result
+
+def run_accounts(cookies, on_line=None, on_account_done=None, should_stop=None, gap=(1, 3)):
+    reset_run_state()
+    results = []
+    for index, ck in enumerate(cookies, start=1):
+        if should_stop and should_stop():
+            break
+        if on_line:
+            on_line(f'\n======== ▷ 第 {index} 个账号 ◁ ========')
+        res = run_one(ck, on_line=on_line)
+        results.append(res)
+        if on_account_done:
+            on_account_done(res)
+        if index < len(cookies):
+            if should_stop and should_stop():
+                break
+            time.sleep(random.uniform(gap[0], gap[1]))
+    return results
+
+def build_summary(results):
+    lines = []
+    ok_count = sum(1 for r in results if r.get('ok'))
+    total_bean = sum(int(r.get('cloud_total') or 0) for r in results)
+    got_bean = sum(int(r.get('cloud_received') or 0) for r in results)
+    lines.append(f'账号总数: {len(results)}  成功: {ok_count}  失败: {len(results) - ok_count}')
+    lines.append(f'本次领取 AI 豆: {got_bean}  账户 AI 豆总量: {total_bean}')
+    for r in results:
+        flag = '✅' if r.get('ok') else '❌'
+        lines.append(f"{flag} {r.get('account')}  余额 {r.get('cloud_total')}  +{r.get('cloud_received')}")
+    return '\n'.join(lines)

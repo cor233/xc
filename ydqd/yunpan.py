@@ -527,7 +527,7 @@ class YP:
             self.click_num = 15
             self.draw = 1
             self.client_version = '13.0.0'
-            self.market_base_url = 'https://m.mcloud.139.com'
+            self.market_base_url = 'https://yun.139.com'
             self.market_source_id = '1097'
             self.sso_token = None
             self.user_domain_id = ''
@@ -571,7 +571,7 @@ class YP:
             self.jwtHeaders = {
                 'User-Agent': ua,
                 'Accept': '*/*',
-                'Host': 'caiyun.feixin.10086.cn:7071',
+                'Host': 'yun.139.com',
             }
             self.treeHeaders = {
                 'Host': 'happy.mail.10086.cn',
@@ -808,18 +808,9 @@ class YP:
             try:
                 self.signin_status()
                 self.click()
-                self.get_tasklist(url='sign_in_3', app_type='cloud_app')
-                self.log(f'\n📰 公众号任务')
-                self.wxsign()
-                self.shake()
-                self.surplus_num()
-                self.log(f'\n🔥 热门任务')
-                self.backup_cloud()
-                self.complete_notice_task()
-                self.log(f'\n📧 139邮箱任务')
-                self.get_tasklist(url='newsign_139mail', app_type='email_app')
+                self.get_cloud_tasklist_v2()
             except Exception as e:
-                self.log(f'-旧版签到任务执行异常: {e}')
+                self.log(f'-签到或任务执行异常: {e}')
             
             try:
                 self.receive()
@@ -940,7 +931,7 @@ class YP:
         if any(cookie.name.startswith('.thumbcache_') and unquote(cookie.value) == cookie_value
                for cookie in self.session.cookies):
             return
-        self.session.cookies.set(f'.thumbcache_{self.account}', cookie_value, domain='m.mcloud.139.com', path='/')
+        self.session.cookies.set(f'.thumbcache_{self.account}', cookie_value, domain='yun.139.com', path='/')
 
     def build_market_page_url(self, source_id=None):
         current_source_id = source_id or self.market_source_id
@@ -986,7 +977,7 @@ class YP:
     def post_signin_journaling(self, keyword, source_id=None):
         current_source_id = source_id or self.market_source_id
         payload = f'module=uservisit&optkeyword={keyword}&sourceid={current_source_id}&marketName=sign_in_3'
-        response = self.send_request(f'{self.market_base_url}/ycloud/visitlog/journaling',
+        response = self.send_request(f'{self.market_base_url}/orchestration/personalCloud/ycloud/visitlog/journaling',
                                      headers=self.build_market_headers(
                                          {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
                                          referer=self.build_market_page_url(current_source_id)
@@ -1013,10 +1004,10 @@ class YP:
         return True
 
     def click_task(self, task_id, key='task'):
-        return self.request_market_json(f'{self.market_base_url}/ycloud/signin/task/click?key={key}&id={task_id}')
+        return self.request_market_json(f'{self.market_base_url}/orchestration/personalCloud/signin/task/click?key={key}&id={task_id}')
 
     def get_notice_status(self):
-        send_data = self.request_json('https://caiyun.feixin.10086.cn/market/msgPushOn/task/status',
+        send_data = self.request_json('https://yun.139.com/orchestration/personalCloud/market/msgPushOn/task/status',
                                       headers=self.jwtHeaders) or {}
         if send_data.get('code') != 0:
             return {}
@@ -1397,7 +1388,7 @@ class YP:
         ]
 
     def query_cloud_task(self, task_id, group='time'):
-        return_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/task/taskListV2',
+        return_data = self.request_market_json(f'{self.market_base_url}/orchestration/personalCloud/signin/task/taskListV2',
                                                json_body=True, method='POST', data={
             'marketname': 'sign_in_3',
             'clientVersion': self.client_version,
@@ -1438,7 +1429,7 @@ class YP:
 
     def get_cloud_tasklist_v2(self):
         for group, title in self.get_cloud_task_groups():
-            return_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/task/taskListV2',
+            return_data = self.request_market_json(f'{self.market_base_url}/orchestration/personalCloud/signin/task/taskListV2',
                                                    json_body=True, method='POST', data={
                 'marketname': 'sign_in_3',
                 'clientVersion': self.client_version,
@@ -1527,7 +1518,7 @@ class YP:
 
     def claim_revival_reward(self):
         try:
-            url = f'{self.market_base_url}/ycloud/signin/page/receiveRevivalReward'
+            url = f'{self.market_base_url}/orchestration/personalCloud/signin/page/receiveRevivalReward'
             data = self.request_market_json(url, json_body=True, method='POST', data={}, retries=2)
             if not data:
                 return
@@ -1546,7 +1537,7 @@ class YP:
 
     def claim_multiple_clouds(self):
         try:
-            url = f'{self.market_base_url}/ycloud/signin/page/multiple'
+            url = f'{self.market_base_url}/orchestration/personalCloud/signin/page/multiple'
             data = self.request_market_json(url, retries=2)
             if not data or data.get('code') != 0:
                 return
@@ -1606,7 +1597,7 @@ class YP:
     @catch_errors
     def signin_status(self):
         self.sleep()
-        check_url = f'{self.market_base_url}/ycloud/signin/page/infoV3'
+        check_url = f'{self.market_base_url}/orchestration/personalCloud/signin/page/infoV3'
         check_data = self.request_market_json(check_url, params={'client': 'app'})
         if not check_data:
             self.log('查询签到失败: 接口无响应')
@@ -1619,7 +1610,7 @@ class YP:
             self.log('✅已签到')
             return
         self.sleep(1, 2)
-        signin_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/startSignIn',
+        signin_data = self.request_market_json(f'{self.market_base_url}/orchestration/personalCloud/signin/page/startSignIn',
                                                params={'client': 'app'})
         if not signin_data:
             self.log('签到失败: 接口无响应')
@@ -1687,7 +1678,7 @@ class YP:
         if url == 'sign_in_3' and app_type == 'cloud_app':
             self.get_cloud_tasklist_v2()
             return
-        url = f'https://caiyun.feixin.10086.cn/market/signin/task/taskList?marketname={url}'
+        url = f'https://yun.139.com/orchestration/personalCloud/signin/task/taskList?marketname={url}'
         return_data = self.send_request(url, headers=self.jwtHeaders, cookies=self.cookies).json()
         self.sleep()
         task_list = return_data.get('result', {})
@@ -1751,7 +1742,7 @@ class YP:
         if app_type == 'cloud_app':
             self.click_task(task_id)
         else:
-            task_url = f'https://caiyun.feixin.10086.cn/market/signin/task/click?key=task&id={task_id}'
+            task_url = f'https://yun.139.com/orchestration/personalCloud/signin/task/click?key=task&id={task_id}'
             self.send_request(task_url, headers=self.jwtHeaders, cookies=self.cookies)
 
         if app_type == 'cloud_app':
@@ -1872,7 +1863,7 @@ class YP:
     @catch_errors
     def wxsign(self):
         self.sleep()
-        url = 'https://caiyun.feixin.10086.cn/market/playoffic/followSignInfo?isWx=true'
+        url = 'https://yun.139.com/orchestration/personalCloud/market/playoffic/followSignInfo?isWx=true'
         resp = self.send_request(url, headers=self.jwtHeaders, cookies=self.cookies)
         if resp is None:
             self.log('公众号任务: 接口无响应，跳过')
@@ -1886,7 +1877,7 @@ class YP:
         return self.log('✅公众号签到成功')
 
     def shake(self):
-        url = "https://caiyun.feixin.10086.cn:7071/market/shake-server/shake/shakeIt?flag=1"
+        url = "https://yun.139.com/orchestration/personalCloud/market/shake-server/shake/shakeIt?flag=1"
         successful_shakes = 0
         aborted = False
 
@@ -1914,8 +1905,8 @@ class YP:
     @catch_errors
     def surplus_num(self):
         self.sleep()
-        draw_info_url = 'https://caiyun.feixin.10086.cn/market/playoffic/drawInfo'
-        draw_url = "https://caiyun.feixin.10086.cn/market/playoffic/draw"
+        draw_info_url = 'https://yun.139.com/orchestration/personalCloud/market/playoffic/drawInfo'
+        draw_url = "https://yun.139.com/orchestration/personalCloud/market/playoffic/draw"
 
         draw_info_data = self.send_request(draw_info_url, headers=self.jwtHeaders).json()
 
@@ -1956,9 +1947,9 @@ class YP:
 
     @catch_errors
     def cloud_game(self):
-        game_info_url = 'https://caiyun.feixin.10086.cn/market/signin/hecheng1T/info?op=info'
-        bigin_url = 'https://caiyun.feixin.10086.cn/market/signin/hecheng1T/beinvite'
-        end_url = 'https://caiyun.feixin.10086.cn/market/signin/hecheng1T/finish?flag=true'
+        game_info_url = 'https://yun.139.com/orchestration/personalCloud/market/signin/hecheng1T/info?op=info'
+        bigin_url = 'https://yun.139.com/orchestration/personalCloud/market/signin/hecheng1T/beinvite'
+        end_url = 'https://yun.139.com/orchestration/personalCloud/market/signin/hecheng1T/finish?flag=true'
 
         game_info_data = self.send_request(game_info_url, headers=self.jwtHeaders, cookies=self.cookies).json()
         if game_info_data and game_info_data.get('code', -1) == 0:
@@ -1979,13 +1970,13 @@ class YP:
             print("-获取游戏信息失败")
 
     def receive_cloud_once(self, method='POST'):
-        return self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/receiveV3',
+        return self.request_market_json(f'{self.market_base_url}/orchestration/personalCloud/signin/page/receiveV3',
                                         params={'client': 'app'},
                                         headers=self.build_receive_headers(),
                                         method=method, json_body=True, data={})
 
     def diagnose_receive(self):
-        url = f'{self.market_base_url}/ycloud/signin/page/receiveV3'
+        url = f'{self.market_base_url}/orchestration/personalCloud/signin/page/receiveV3'
         headers = self.build_market_headers({
             'showLoading': 'true',
             'appVersion': f'{self.client_version}.0',
@@ -2006,7 +1997,7 @@ class YP:
                 self.log(f'-领取诊断异常[{method}]: {e}')
 
     def recheck_pending(self, pending_amount, total_amount):
-        latest_info_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/infoV3',
+        latest_info_data = self.request_market_json(f'{self.market_base_url}/orchestration/personalCloud/signin/page/infoV3',
                                                     params={'client': 'app'})
         latest_result = latest_info_data.get('result', {}) if latest_info_data and latest_info_data.get('code') == 0 else {}
         latest_pending = latest_result.get('toReceive', pending_amount)
@@ -2018,8 +2009,8 @@ class YP:
 
     @catch_errors
     def receive(self):
-        prize_url = f"https://caiyun.feixin.10086.cn/market/prizeApi/checkPrize/getUserPrizeLogPage?currPage=1&pageSize=15&_={self.timestamp}"
-        info_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/page/infoV3',
+        prize_url = f"https://yun.139.com/orchestration/personalCloud/market/prizeApi/checkPrize/getUserPrizeLogPage?currPage=1&pageSize=15&_={self.timestamp}"
+        info_data = self.request_market_json(f'{self.market_base_url}/orchestration/personalCloud/signin/page/infoV3',
                                              params={'client': 'app'})
         if not info_data:
             self.log('查询云朵失败: 接口无响应')
@@ -2077,7 +2068,7 @@ class YP:
 
     @catch_errors
     def backup_cloud(self):
-        backup_url = 'https://caiyun.feixin.10086.cn/market/backupgift/info'
+        backup_url = 'https://yun.139.com/orchestration/personalCloud/market/backupgift/info'
         backup_data = self.send_request(backup_url, headers=self.jwtHeaders).json()
         state = backup_data.get('result', {}).get('state', '')
         if state == -1:
@@ -2085,14 +2076,14 @@ class YP:
 
         elif state == 0:
             self.log('-领取本月连续备份奖励')
-            cur_url = 'https://caiyun.feixin.10086.cn/market/backupgift/receive'
+            cur_url = 'https://yun.139.com/orchestration/personalCloud/market/backupgift/receive'
             cur_data = self.send_request(cur_url, headers=self.jwtHeaders).json()
             self.log(f'-获得云朵数量:{cur_data.get("result").get("result")}')
 
         elif state == 1:
             print('-已领取本月连续备份奖励')
         self.sleep()
-        expend_url = f'{self.market_base_url}/ycloud/signin/page/taskExpansion'
+        expend_url = f'{self.market_base_url}/orchestration/personalCloud/signin/page/taskExpansion'
         expend_data = self.request_market_json(expend_url) or {}
 
         curMonthBackup = expend_data.get('result', {}).get('curMonthBackup', '')
@@ -2110,7 +2101,7 @@ class YP:
             if curMonthBackupTaskAccept:
                 print('- 上月已备份，膨胀云朵已领取')
             else:
-                receive_url = f'{self.market_base_url}/ycloud/signin/page/receiveTaskExpansion?acceptDate={acceptDate}'
+                receive_url = f'{self.market_base_url}/orchestration/personalCloud/signin/page/receiveTaskExpansion?acceptDate={acceptDate}'
                 receive_data = self.request_market_json(receive_url)
                 if not receive_data or receive_data.get('code') != 0:
                     msg = receive_data.get('msg', '接口无响应') if receive_data else '接口无响应'
@@ -2135,7 +2126,7 @@ class YP:
         total = notice_status.get('total', 31)
 
         if pushOn == 1:
-            reward_url = 'https://caiyun.feixin.10086.cn/market/msgPushOn/task/obtain'
+            reward_url = 'https://yun.139.com/orchestration/personalCloud/market/msgPushOn/task/obtain'
 
             if firstTaskStatus == 3:
                 print('- 任务1奖励已领取')

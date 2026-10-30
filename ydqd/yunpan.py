@@ -2450,128 +2450,46 @@ class YP:
                 self.handle_red_packet_task(task)
         self.log_red_packet_balance()
 
-def reset_run_state():
-    global err_accounts, all_logs, user_amount
-    err_accounts = ''
-    all_logs = ''
-    user_amount = ''
 
-def split_cookies(raw):
-    parts = re.split(r'[&\n\r;]+', raw or '')
-    return [p.strip() for p in parts if p.strip()]
-
-def mask_phone(phone):
-    phone = (phone or '').strip()
-    if len(phone) >= 11:
-        return phone[:3] + '****' + phone[-4:]
-    return phone or '未知账号'
-
-def parse_account_label(cookie):
-    try:
-        parts = (cookie or '').split('#')
-        if len(parts) >= 2:
-            return parts[1].strip()
-    except Exception:
-        pass
-    return ''
-
-def extract_cloud_received(log_lines):
-    total = 0
-    pattern = re.compile(r'领取云朵[:：]\s*(\d+)')
-    for line in log_lines or []:
-        m = pattern.search(line)
-        if m:
-            try:
-                total += int(m.group(1))
-            except ValueError:
-                pass
-    return total
-
-def run_one(cookie, on_line=None, writer=None):
-    import contextlib
-    import io as _io
-
-    result = {
-        'phone': parse_account_label(cookie),
-        'account': mask_phone(parse_account_label(cookie)),
-        'ok': False,
-        'signin': False,
-        'cloud_total': 0,
-        'cloud_received': 0,
-        'log': '',
-        'error': '',
-    }
-
-    if not cookie or '#' not in cookie:
-        result['error'] = '格式错误，应为 Authorization#手机号'
-        return result
-
-    buffer = _io.StringIO()
-
-    class _Tee(object):
-        def write(self, text):
-            buffer.write(text)
-            if on_line:
-                for line in text.splitlines():
-                    on_line(line)
-            return len(text)
-
-        def flush(self):
-            pass
-
-    target = writer if writer is not None else _Tee()
-    try:
-        with contextlib.redirect_stdout(target):
-            yp = YP(cookie)
-            if not yp.Authorization:
-                result['error'] = '账号初始化失败（Authorization 无效）'
-                return result
-            yp.session.cookies.clear()
-            yp.run()
-    except Exception as e:
-        result['error'] = f'{type(e).__name__}: {e}'
-        return result
-
-    lines = list(getattr(yp, 'user_log_lines', []) or [])
-    raw = buffer.getvalue()
-    if not lines and raw:
-        lines = [l for l in raw.splitlines() if l.strip()]
-
-    result['ok'] = bool(getattr(yp, 'login_ok', False))
-    result['signin'] = bool(getattr(yp, 'signin_ok', False))
-    result['cloud_total'] = getattr(yp, 'cloud_total', 0) or 0
-    result['cloud_received'] = extract_cloud_received(lines)
-    result['log'] = '\n'.join(lines)
-    if not result['ok']:
-        result['error'] = '账号可能已失效（JWT 获取失败）'
-    return result
-
-def run_accounts(cookies, on_line=None, on_account_done=None, should_stop=None, gap=(1, 3)):
-    reset_run_state()
-    results = []
-    for index, ck in enumerate(cookies, start=1):
-        if should_stop and should_stop():
-            break
-        if on_line:
-            on_line(f'\n======== ▷ 第 {index} 个账号 ◁ ========')
-        res = run_one(ck, on_line=on_line)
-        results.append(res)
-        if on_account_done:
-            on_account_done(res)
-        if index < len(cookies):
-            if should_stop and should_stop():
-                break
-            time.sleep(random.uniform(gap[0], gap[1]))
-    return results
-
-def build_summary(results):
-    lines = []
-    ok_count = sum(1 for r in results if r.get('ok'))
-    total_bean = sum(int(r.get('cloud_total') or 0) for r in results)
-    got_bean = sum(int(r.get('cloud_received') or 0) for r in results)
-    lines.append(f'账号总数: {len(results)}  成功: {ok_count}  失败: {len(results) - ok_count}')
-    lines.append(f'本次领取 AI 豆: {got_bean}  账户 AI 豆总量: {total_bean}')
-    for r in results:
-        flag = '✅' if r.get('ok') else '❌'
-        lines.append(f"{flag} {r.get('account')}  余额 {r.get('cloud_total')}  +{r.get('cloud_received')}")
-    return '\n'.join(lines)
+if __name__ == "__main__":
+    env_name = 'yunpan'
+    token = os.getenv(env_name)
+    if not token:
+        print(f'⛔️未获取到ck变量：请检查变量 {env_name} 是否填写')
+        exit(0)
+    
+    cookies = re.split(r'[&]', token)
+    print(f"共获取到 {len(cookies)} 个账号")
+    print_device_id_notice()
+    
+    for i, account_info in enumerate(cookies, start=1):
+        print(f"\n======== ▷ 第 {i} 个账号 ◁ ========")
+        yp_instance = YP(account_info)
+        if not yp_instance.Authorization:
+            print(f"⛔️ 账号 {i} 无效，跳过执行")
+            continue
+        yp_instance.session.cookies.clear()
+        yp_instance.run()
+        print("\n准备进行下一个账号")
+        time.sleep(random.uniform(1, 3))
+        
+    print("\n================ 运行总结 ================")
+    if err_accounts:
+        print(f"❌ 失效账号:\n{err_accounts}")
+    if user_amount:
+        print(f"☁️ 云朵汇总:\n{user_amount}")
+    
+    msg = ""
+    if err_accounts:
+        msg += f"失效账号:\n{err_accounts}\n"
+    msg += f"任务详情:\n{all_logs}\n"
+    msg += f"云朵汇总:\n{user_amount}"
+    
+    msg = msg.replace('-', ' ').replace('.', ' ').replace('!', '！').replace('(', '（').replace(')', '）')
+    msg = msg.replace('_', ' ').replace('=', ' ').replace('~', ' ').replace('{', ' ').replace('}', ' ').replace('|', ' ')
+    
+    send_func = load_send()
+    if send_func:
+        send_func('中国移动云盘任务信息', msg)
+    else:
+        print("未找到通知服务，跳过推送")

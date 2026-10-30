@@ -18,8 +18,8 @@ BROWSER_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
 API = 'https://api.365ting.com'
 TY = API + '/tingyou-app'
 DEVICE_PREFIX = 'tvbox-tingshijie-'
-CACHE_FILE = 'i275_cache.json'
-LOG_FILE = 'i275.log'
+CACHE_FILE = 'syp_cache.json'
+LOG_FILE = 'syp.log'
 META_KEYS = ('id', 'title', 'cover_url', 'teller', 'author', 'count', 'description')
 
 _DISK_LOCK = threading.Lock()
@@ -27,7 +27,7 @@ _DISK_LOCK = threading.Lock()
 
 def LOG(msg):
     try:
-        print('[i275]', msg)
+        print('[syp]', msg)
     except Exception:
         pass
 
@@ -36,7 +36,7 @@ def get_data_dir():
     exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
     candidates = [exe_dir]
     if os.environ.get('APPDATA'):
-        candidates.append(os.path.join(os.environ['APPDATA'], 'i275'))
+        candidates.append(os.path.join(os.environ['APPDATA'], 'syp'))
     candidates.append(os.path.expanduser('~'))
     for d in candidates:
         try:
@@ -556,7 +556,7 @@ class DownloadApp:
         self.current_chapters = []
         self.current_book_title = ''
         self.current_book_narrator = ''
-        self.download_folder = tk.StringVar(value=os.path.join(APP_DIR, 'i275'))
+        self.download_folder = tk.StringVar(value=os.path.join(APP_DIR, 'syp'))
 
         self.paused_event = threading.Event()
         self.stop_event = threading.Event()
@@ -912,7 +912,7 @@ class DownloadApp:
             self.update_completed_failed(0, 0)
             return
         folder_name = sanitize_name('%s-%s' % (self.current_book_title, self.current_book_narrator))
-        save_root = self.download_folder.get() or os.path.join(APP_DIR, 'i275')
+        save_root = self.download_folder.get() or os.path.join(APP_DIR, 'syp')
         json_path = os.path.join(save_root, folder_name, '%s.json' % folder_name)
         self.json_path = json_path
         completed, failed = 0, 0
@@ -1129,7 +1129,7 @@ class DownloadApp:
                     self.log('保存记录文件失败: %s' % e)
 
     def _prepare_context(self):
-        save_root = self.download_folder.get() or os.path.join(APP_DIR, 'i275')
+        save_root = self.download_folder.get() or os.path.join(APP_DIR, 'syp')
         with self.chapters_lock:
             book_title = self.current_book_title
             book_narrator = self.current_book_narrator

@@ -486,16 +486,14 @@ class DownloadApp:
         left = ttk.LabelFrame(pane, text='搜索结果')
         result_frame = ttk.Frame(left)
         result_frame.pack(fill=tk.BOTH, expand=True)
-        self.result_tree = ttk.Treeview(result_frame, columns=('title', 'narrator', 'id'),
+        self.result_tree = ttk.Treeview(result_frame, columns=('title', 'narrator'),
                                         show='tree headings', height=20)
         self.result_tree.heading('#0', text='序号')
         self.result_tree.heading('title', text='书名')
         self.result_tree.heading('narrator', text='演播')
-        self.result_tree.heading('id', text='专辑ID')
         self.result_tree.column('#0', width=50)
-        self.result_tree.column('title', width=280)
-        self.result_tree.column('narrator', width=140)
-        self.result_tree.column('id', width=110)
+        self.result_tree.column('title', width=320)
+        self.result_tree.column('narrator', width=160)
         self.result_tree.bind('<<TreeviewSelect>>', self.on_book_select)
         sl = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.result_tree.yview)
         self.result_tree.configure(yscrollcommand=sl.set)
@@ -662,7 +660,7 @@ class DownloadApp:
             return
         for idx, b in enumerate(books, start=1):
             self.result_tree.insert('', tk.END, text=str(idx),
-                                    values=(b['title'], b['narrator'], b['id']),
+                                    values=(b['title'], b['narrator']),
                                     iid=str(idx))
         self.log('找到 %d 个专辑' % len(books))
         if len(books) == 1:

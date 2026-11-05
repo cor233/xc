@@ -38,7 +38,7 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python yunpan.py
 
-         - name: 输出 deviceId
+      - name: 输出 deviceId
         if: always()
         run: |
           echo "### deviceId 信息" >> $GITHUB_STEP_SUMMARY

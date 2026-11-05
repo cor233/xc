@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 import threading
+import traceback
 import requests
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -73,8 +74,9 @@ def sanitize_name(name):
 
 class SourceClient:
 
-    def __init__(self, log_callback=None):
-        self.log = log_callback or LOG
+    def __init__(self, status_cb=None, error_cb=None):
+        self.status = status_cb or LOG
+        self.error = error_cb or LOG
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': BROWSER_UA,
@@ -88,7 +90,7 @@ class SourceClient:
         self._boot_lock = threading.Lock()
         self._map_lock = threading.RLock()
         self._info_cache = {}
-        self.log('听友FM 源就绪')
+        self.status('听友FM 源就绪')
 
     def _parse_chapter(self, c, i):
         idx = c.get('index')
@@ -149,40 +151,40 @@ class SourceClient:
                 )
                 if r.status_code == 429:
                     delay = 60 if attempt == 0 else 120
-                    self.log('搜索被限流(429), 等待 %d 秒后重试 (%d/3)...' % (delay, attempt + 1))
+                    self.status('搜索限流, 等待 %d 秒后重试 (%d/3)...' % (delay, attempt + 1))
                     if attempt < 2:
                         time.sleep(delay)
                         continue
-                    self.log('搜索限流仍未恢复, 请 10 分钟后再试')
+                    self.error('搜索限流仍未恢复, 请 10 分钟后再试')
                     return []
                 if r.status_code != 200:
-                    self.log('搜索返回 %d: %s' % (r.status_code, r.text[:200]))
+                    self.error('搜索返回 %d: %s' % (r.status_code, r.text[:200]))
                     return []
                 ct = (r.headers.get('Content-Type') or '').lower()
                 if 'json' not in ct:
-                    self.log('搜索响应非 JSON: %s' % ct)
+                    self.error('搜索响应非 JSON: %s' % ct)
                     return []
                 j = r.json()
                 albums = self._find_albums(j)
                 if albums is None:
-                    self.log('搜索结构未识别: %s' % str(j)[:300])
+                    self.error('搜索结构未识别: %s' % str(j)[:300])
                     return []
                 out = []
                 for a in albums:
                     item = self._parse_album(a)
                     if item:
                         out.append(item)
-                self.log('搜索命中 %d 条' % len(out))
+                self.status('搜索命中 %d 条' % len(out))
                 return out
             except Exception as e:
-                self.log('搜索异常: %s' % e)
+                self.error('搜索异常: %s' % e)
                 return []
         return []
 
     def get_chapters(self, book):
         aid = book['id']
         url = CHAPTER_API.format(album_id=aid)
-        self.log('获取章节: %s' % url)
+        self.status('正在获取章节列表...')
         r = self.session.get(url, timeout=20)
         r.raise_for_status()
         data = r.json()
@@ -193,7 +195,7 @@ class SourceClient:
         if not out:
             raise RuntimeError('章节列表为空')
         out.sort(key=lambda x: x['index'])
-        self.log('获取到 %d 章' % len(out))
+        self.status('获取到 %d 章' % len(out))
         return out
 
     def get_audio_url(self, album_id, chapter_idx):
@@ -263,7 +265,7 @@ def _interruptible_sleep(stop_event, secs):
     return False
 
 
-def download_audio(url, save_path, retry=3, log_callback=None, stop_event=None,
+def download_audio(url, save_path, retry=3, status_cb=None, stop_event=None,
                    connect_timeout=10, read_timeout=60, segments=2):
     temp_path = save_path + '.tmp'
     headers = {
@@ -272,6 +274,10 @@ def download_audio(url, save_path, retry=3, log_callback=None, stop_event=None,
         'Accept': '*/*',
         'Accept-Encoding': 'identity',
     }
+    last_err = ['']
+
+    def _set_err(msg):
+        last_err[0] = msg
 
     def _single_download():
         r = requests.get(url, headers=headers, stream=True, timeout=(connect_timeout, read_timeout))
@@ -292,35 +298,27 @@ def download_audio(url, save_path, retry=3, log_callback=None, stop_event=None,
         if written == 0:
             raise Exception('下载字节数为 0')
         os.replace(temp_path, save_path)
-        if log_callback:
-            log_callback('完成(单连接): %s (%d 字节)' % (os.path.basename(save_path), written))
         return 'ok'
 
     for attempt in range(retry):
         if stop_event and stop_event.is_set():
-            return False
+            return False, '已取消'
         part_files = []
         try:
-            if log_callback:
-                log_callback('请求音频(%d/%d): %s' % (attempt + 1, retry, url[:80]))
-
             total, accept_range, ct = _probe_file(url, headers, (connect_timeout, read_timeout))
 
             if ct == 'rate_limited':
                 wait_secs = 30 * (attempt + 1)
-                if log_callback:
-                    log_callback('服务端限流, 等待 %d 秒重试...' % wait_secs)
+                if status_cb:
+                    status_cb('服务端限流, 等待 %d 秒...' % wait_secs)
                 if _interruptible_sleep(stop_event, wait_secs):
-                    return False
+                    return False, '已取消'
                 continue
 
-            if log_callback:
-                log_callback('探测: size=%s range=%s ct=%s' % (total, accept_range, ct))
-
             if 'html' in ct or 'json' in ct or 'text/' in ct:
-                raise Exception('返回了非音频内容: %s' % ct)
+                raise Exception('返回非音频: %s' % ct)
             if total is None or total == 0:
-                raise Exception('无法获取文件大小')
+                raise Exception('未知文件大小')
 
             if accept_range and total >= 1024 * 1024 and segments > 1:
                 seg_size = (total + segments - 1) // segments
@@ -349,8 +347,8 @@ def download_audio(url, save_path, retry=3, log_callback=None, stop_event=None,
                             rate_limited = True
 
                 if rate_limited:
-                    if log_callback:
-                        log_callback('分段触发限流, 降级为单连接下载...')
+                    if status_cb:
+                        status_cb('分段触发限流, 降级单连接...')
                     for p in part_files:
                         if os.path.exists(p):
                             try:
@@ -361,7 +359,7 @@ def download_audio(url, save_path, retry=3, log_callback=None, stop_event=None,
                     r = _single_download()
                     if r == 'rate_limited':
                         raise Exception('单连接也被限流')
-                    return True
+                    return True, ''
 
                 written_total = 0
                 for s, e, p in plans:
@@ -371,7 +369,7 @@ def download_audio(url, save_path, retry=3, log_callback=None, stop_event=None,
                     written_total += n
 
                 if written_total != total:
-                    raise Exception('分段总大小不一致 %d/%d' % (written_total, total))
+                    raise Exception('分段大小不一致 %d/%d' % (written_total, total))
 
                 with open(temp_path, 'wb') as out:
                     for p in part_files:
@@ -383,25 +381,21 @@ def download_audio(url, save_path, retry=3, log_callback=None, stop_event=None,
                                 out.write(buf)
 
                 os.replace(temp_path, save_path)
-                if log_callback:
-                    log_callback('完成(分块并发 %d 段): %s (%d 字节)'
-                                 % (len(plans), os.path.basename(save_path), total))
-                return True
+                return True, ''
 
             r = _single_download()
             if r == 'rate_limited':
                 raise Exception('单连接被限流')
-            return True
+            return True, ''
 
         except InterruptedError:
-            return False
+            return False, '已取消'
         except Exception as e:
-            if log_callback:
-                log_callback('下载异常(%d/%d): %s' % (attempt + 1, retry, e))
+            _set_err(str(e) or '下载失败')
             if attempt == retry - 1:
-                return False
+                return False, last_err[0]
             if _interruptible_sleep(stop_event, 10):
-                return False
+                return False, '已取消'
         finally:
             for p in [temp_path] + part_files:
                 if os.path.exists(p):
@@ -409,7 +403,7 @@ def download_audio(url, save_path, retry=3, log_callback=None, stop_event=None,
                         os.remove(p)
                     except OSError:
                         pass
-    return False
+    return False, last_err[0] or '下载失败'
 
 
 class DownloadApp:
@@ -417,8 +411,8 @@ class DownloadApp:
     def __init__(self, root):
         self.root = root
         self.root.title('听友FM下载器')
-        self.root.geometry('1280x800')
-        self.root.minsize(1100, 700)
+        self.root.geometry('1280x760')
+        self.root.minsize(1100, 680)
 
         self.search_results = []
         self.current_book = None
@@ -446,9 +440,12 @@ class DownloadApp:
         self.session_id = 0
         self.load_token = 0
 
+        self._err_lock = threading.Lock()
+        self._err_fp = None
+
         self._init_log_file()
         self.create_widgets()
-        self.client = SourceClient(log_callback=self.log)
+        self.client = SourceClient(status_cb=self.status, error_cb=self.error)
         self.root.protocol('WM_DELETE_WINDOW', self.on_closing)
 
     def _init_log_file(self):
@@ -533,7 +530,7 @@ class DownloadApp:
         self.chapter_tree.heading('status', text='状态', anchor=tk.CENTER)
         self.chapter_tree.column('index', width=70, anchor=tk.CENTER)
         self.chapter_tree.column('title', width=380, anchor=tk.CENTER)
-        self.chapter_tree.column('status', width=100, anchor=tk.CENTER)
+        self.chapter_tree.column('status', width=120, anchor=tk.CENTER)
         sr = ttk.Scrollbar(chap_frame, orient=tk.VERTICAL, command=self.chapter_tree.yview)
         self.chapter_tree.configure(yscrollcommand=sr.set)
         self.chapter_tree.grid(row=0, column=0, sticky='nsew')
@@ -551,13 +548,11 @@ class DownloadApp:
         self.failed_label = ttk.Label(stats, text='失败: 0', font=('', 10))
         self.failed_label.pack(side=tk.LEFT, padx=10, expand=True)
 
-        logf = ttk.LabelFrame(self.root, text='日志 (同时写入 %s)' % LOG_FILE)
-        logf.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
-        self.log_text = tk.Text(logf, height=8, wrap=tk.WORD, font=('Consolas', 9))
-        slg = ttk.Scrollbar(logf, orient=tk.VERTICAL, command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=slg.set)
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        slg.pack(side=tk.RIGHT, fill=tk.Y)
+        self.status_var = tk.StringVar(value='就绪')
+        status_bar = ttk.Frame(self.root)
+        status_bar.pack(fill=tk.X, padx=10, pady=(0, 10))
+        tk.Label(status_bar, textvariable=self.status_var, anchor=tk.W,
+                 relief=tk.SUNKEN, bd=1, padx=6, pady=3).pack(fill=tk.X)
 
     def update_max_workers(self):
         val = self.max_workers
@@ -571,39 +566,49 @@ class DownloadApp:
         self.workers_spinbox.delete(0, tk.END)
         self.workers_spinbox.insert(0, str(val))
 
-    def log(self, message):
-        line = '%s - %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), message)
-        try:
-            with open(os.path.join(APP_DIR, LOG_FILE), 'a', encoding='utf-8') as f:
-                f.write(line)
-        except Exception:
-            pass
-
-        def _log():
+    def status(self, message):
+        def _ui():
             if self.destroyed:
                 return
-            if not hasattr(self, 'log_text') or self.log_text is None:
-                return
             try:
-                self.log_text.insert(tk.END, line)
-                self.log_text.see(tk.END)
-                self._trim_log()
+                self.status_var.set(message)
             except tk.TclError:
                 pass
         if threading.current_thread() is threading.main_thread():
-            _log()
+            _ui()
         else:
             try:
-                self.root.after(0, _log)
+                self.root.after(0, _ui)
             except tk.TclError:
                 pass
 
-    def _trim_log(self):
-        max_lines, keep = 1000, 500
-        n = int(self.log_text.index('end-1c').split('.')[0])
-        if n > max_lines:
-            self.log_text.delete('1.0', '%d.0' % (n - keep))
-            self.log_text.see(tk.END)
+    def error(self, message):
+        line = '%s [ERROR] %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), message)
+        with self._err_lock:
+            try:
+                if self._err_fp is None:
+                    self._err_fp = open(os.path.join(APP_DIR, LOG_FILE), 'a', encoding='utf-8')
+                self._err_fp.write(line)
+                self._err_fp.flush()
+            except Exception:
+                pass
+        self.status('错误: %s' % message)
+
+    @staticmethod
+    def _record_status(entry):
+        if isinstance(entry, dict):
+            return entry.get('status', '')
+        return entry or ''
+
+    @staticmethod
+    def _record_err(entry):
+        if isinstance(entry, dict):
+            return entry.get('err', '')
+        return ''
+
+    @classmethod
+    def _is_done(cls, entry):
+        return cls._record_status(entry) == '完成'
 
     def select_folder(self):
         folder = filedialog.askdirectory()
@@ -619,7 +624,7 @@ class DownloadApp:
             return
         self._searching = True
         self.search_btn.config(state='disabled')
-        self.log('搜索: %s' % keyword)
+        self.status('搜索: %s' % keyword)
         for item in self.result_tree.get_children():
             self.result_tree.delete(item)
         self.chapter_tree.delete(*self.chapter_tree.get_children())
@@ -636,7 +641,7 @@ class DownloadApp:
             try:
                 books = self.client.search(keyword)
             except Exception as e:
-                self.log('搜索异常: %s' % e)
+                self.error('搜索异常: %s' % e)
                 books = []
             try:
                 self.root.after(0, self._on_search_done, books)
@@ -658,13 +663,13 @@ class DownloadApp:
             return
         self.search_results = books
         if not books:
-            self.log('未找到专辑')
+            self.status('未找到专辑')
             return
         for idx, b in enumerate(books, start=1):
             self.result_tree.insert('', tk.END, text=str(idx),
                                     values=(b['title'], b['narrator']),
                                     iid=str(idx))
-        self.log('找到 %d 个专辑' % len(books))
+        self.status('找到 %d 个专辑' % len(books))
         if len(books) == 1:
             self.root.after(100, lambda: self.result_tree.selection_set('1'))
 
@@ -680,7 +685,7 @@ class DownloadApp:
             with self.downloading_lock:
                 still = self.downloading
             if still:
-                self.log('旧下载任务尚未完全停止')
+                self.status('旧下载任务尚未完全停止')
                 return
         with self.record_lock:
             self.record_cache.clear()
@@ -696,7 +701,7 @@ class DownloadApp:
         self.current_book = book
         self.current_book_title = book['title']
         self.current_book_narrator = book['narrator']
-        self.log('加载专辑: %s [%s]' % (book['title'], book['id']))
+        self.status('加载专辑: %s' % book['title'])
         for item in self.chapter_tree.get_children():
             self.chapter_tree.delete(item)
         with self.chapter_items_lock:
@@ -714,11 +719,10 @@ class DownloadApp:
         token = self.load_token
 
         def load():
-            self.log('正在获取章节列表...')
             try:
                 chapters = self.client.get_chapters(book)
             except Exception as e:
-                self.log('加载章节失败: %s' % e)
+                self.error('加载章节失败: %s' % e)
                 chapters = []
             try:
                 self.root.after(0, self._on_chapters_loaded, chapters, token)
@@ -745,7 +749,7 @@ class DownloadApp:
         if self.download_thread and self.download_thread.is_alive():
             self.download_thread.join(timeout=5)
             if self.download_thread.is_alive():
-                self.log('下载线程仍在收尾...')
+                self.status('下载线程仍在收尾...')
                 return
         self.download_thread = None
         self.stop_event.clear()
@@ -763,7 +767,7 @@ class DownloadApp:
                 self.root.after(0, _restore_ui)
             except tk.TclError:
                 pass
-        self.log('已停止下载任务')
+        self.status('已停止下载任务')
 
     def stop_download(self):
         if not self.downloading:
@@ -777,7 +781,7 @@ class DownloadApp:
         with self.chapters_lock:
             self.current_chapters = chapters
         if not chapters:
-            self.log('未找到章节')
+            self.status('未找到章节')
             self.update_completed_failed(0, 0)
             self.update_interval_total()
             return
@@ -793,7 +797,7 @@ class DownloadApp:
                     self.root.update_idletasks()
                 except tk.TclError:
                     return
-        self.log('获取到 %d 个章节' % len(chapters))
+        self.status('获取到 %d 个章节' % len(chapters))
         total = len(chapters)
         self.start_entry.delete(0, tk.END)
         self.start_entry.insert(0, '1')
@@ -816,16 +820,21 @@ class DownloadApp:
                 with self.json_lock:
                     with open(json_path, 'r', encoding='utf-8') as f:
                         record = json.load(f)
-                for status in record.values():
-                    if status == '完成':
+                normalized = {}
+                for k, v in record.items():
+                    if isinstance(v, dict):
+                        normalized[k] = {'status': v.get('status', ''), 'err': v.get('err', '')}
+                    else:
+                        normalized[k] = {'status': str(v), 'err': ''}
+                    if normalized[k]['status'] == '完成':
                         completed += 1
-                    elif status == '失败':
+                    elif normalized[k]['status'] == '失败':
                         failed += 1
                 with self.record_lock:
                     self.record_cache.clear()
-                    self.record_cache.update(record)
+                    self.record_cache.update(normalized)
             except Exception as e:
-                self.log('读取记录失败: %s' % e)
+                self.error('读取记录失败: %s' % e)
                 with self.record_lock:
                     self.record_cache.clear()
         else:
@@ -845,14 +854,19 @@ class DownloadApp:
             return
 
         def _update():
-            for key, status in snapshot.items():
+            for key, entry in snapshot.items():
                 if not key.isdigit():
                     continue
                 item_id = items.get(int(key))
                 if not item_id:
                     continue
+                status = self._record_status(entry)
+                err = self._record_err(entry)
+                text = status
+                if status == '失败' and err:
+                    text = '失败: %s' % err
                 try:
-                    self.chapter_tree.set(item_id, 'status', status)
+                    self.chapter_tree.set(item_id, 'status', text)
                 except tk.TclError:
                     pass
 
@@ -881,8 +895,8 @@ class DownloadApp:
 
     def _update_stats_from_cache(self):
         with self.record_lock:
-            completed = sum(1 for s in self.record_cache.values() if s == '完成')
-            failed = sum(1 for s in self.record_cache.values() if s == '失败')
+            completed = sum(1 for e in self.record_cache.values() if self._record_status(e) == '完成')
+            failed = sum(1 for e in self.record_cache.values() if self._record_status(e) == '失败')
         self.update_completed_failed(completed, failed)
 
     def update_interval_total(self):
@@ -940,15 +954,16 @@ class DownloadApp:
                 messagebox.showinfo('提示', '请先选择专辑')
                 return
         with self.record_lock:
-            failed_nums = sorted([int(k) for k, v in self.record_cache.items() if v == '失败' and k.isdigit()])
+            failed_nums = sorted([int(k) for k, v in self.record_cache.items()
+                                  if self._record_status(v) == '失败' and k.isdigit()])
         if not failed_nums:
             messagebox.showinfo('提示', '没有失败的章节')
             return
-        self.log('重试失败章节: %d 个' % len(failed_nums))
+        self.status('重试失败章节: %d 个' % len(failed_nums))
         self._start_download_custom(failed_nums)
 
     def _start_download(self, start, end):
-        self.log('下载范围: 第 %d 章 至 第 %d 章, 并发数: %d' % (start, end, self.max_workers))
+        self.status('下载范围: 第 %d 章 至 第 %d 章 (并发 %d)' % (start, end, self.max_workers))
         with self.downloading_lock:
             self.downloading = True
             self.session_id += 1
@@ -981,11 +996,11 @@ class DownloadApp:
         if self.paused_event.is_set():
             self.paused_event.clear()
             self.pause_btn.config(text='暂停')
-            self.log('恢复下载')
+            self.status('恢复下载')
         else:
             self.paused_event.set()
             self.pause_btn.config(text='恢复')
-            self.log('暂停下载, 完成当前已提交的章节后将停止新任务')
+            self.status('已暂停, 完成当前任务后停止新任务')
 
     def download_one_chapter(self, chap_num, chap, save_dir, json_path, album_id, sid):
         if sid != self.session_id or self.stop_event.is_set():
@@ -994,7 +1009,8 @@ class DownloadApp:
         key = str(chap_num)
 
         with self.record_lock:
-            if key in self.record_cache and self.record_cache[key] == '完成':
+            entry = self.record_cache.get(key)
+            if entry and self._is_done(entry):
                 self.update_chapter_status(chap_num, '完成')
                 return True, '完成'
 
@@ -1002,52 +1018,59 @@ class DownloadApp:
         filepath = os.path.join(save_dir, filename)
 
         if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-            self.log('[跳过] 文件已存在: %s' % filename)
+            self.status('跳过已存在: %s' % filename)
             if sid != self.session_id:
                 return False, '取消'
             with self.record_lock:
-                self.record_cache[key] = '完成'
+                self.record_cache[key] = {'status': '完成', 'err': ''}
             self.update_chapter_status(chap_num, '完成')
             self.flush_record(json_path)
             self._update_stats_from_cache()
             return True, '完成'
 
-        self.log('正在处理: %s (第%d章)' % (chap_title, chap_num))
+        self.status('处理: %s' % chap_title)
+
+        audio_url = ''
+        url_err = ''
         try:
             audio_url = self.client.get_audio_url(album_id, chap['index'])
         except Exception as e:
-            self.log('获取音频链接异常: %s' % e)
-            audio_url = ''
+            url_err = str(e) or '获取链接失败'
 
         if sid != self.session_id or self.stop_event.is_set():
             return False, '取消'
 
         if not audio_url:
-            self.log('[失败] 获取音频链接失败: %s' % chap_title)
+            self.status('失败: %s (%s)' % (chap_title, url_err))
             with self.record_lock:
-                self.record_cache[key] = '失败'
-            self.update_chapter_status(chap_num, '失败')
+                self.record_cache[key] = {'status': '失败', 'err': url_err}
+            self.update_chapter_status(chap_num, '失败', url_err)
             self.flush_record(json_path)
             self._update_stats_from_cache()
-            return False, '失败'
+            return False, url_err
 
-        self.log('正在下载: %s' % chap_title)
-        success = download_audio(audio_url, filepath,
-                                 log_callback=self.log, stop_event=self.stop_event)
+        self.status('下载: %s' % chap_title)
+        success, err = download_audio(audio_url, filepath,
+                                      status_cb=self.status, stop_event=self.stop_event)
         if sid != self.session_id:
             return False, '取消'
-        status = '完成' if success else '失败'
-        if success:
-            self.log('[成功] %s' % filename)
+
+        if not success:
+            if self.stop_event.is_set() or err == '已取消':
+                return False, '取消'
+            status_entry = {'status': '失败', 'err': err or '下载失败'}
+            self.status('失败: %s (%s)' % (chap_title, err or '下载失败'))
+            self.update_chapter_status(chap_num, '失败', err or '下载失败')
         else:
-            self.log('[失败] %s' % chap_title)
+            status_entry = {'status': '完成', 'err': ''}
+            self.status('完成: %s' % filename)
+            self.update_chapter_status(chap_num, '完成')
 
         with self.record_lock:
-            self.record_cache[key] = status
-        self.update_chapter_status(chap_num, status)
+            self.record_cache[key] = status_entry
         self.flush_record(json_path)
         self._update_stats_from_cache()
-        return success, status
+        return success, status_entry.get('err') or status_entry['status']
 
     def flush_record(self, json_path=None):
         path = json_path or self.json_path
@@ -1064,7 +1087,7 @@ class DownloadApp:
                         json.dump(to_save, f, ensure_ascii=False)
                     os.replace(tmp, path)
                 except Exception as e:
-                    self.log('保存记录失败: %s' % e)
+                    self.error('保存记录失败: %s' % e)
 
     def _prepare_context(self):
         save_root = self.download_folder.get() or os.path.join(APP_DIR, 'tyfm')
@@ -1082,15 +1105,21 @@ class DownloadApp:
                 with self.json_lock:
                     with open(json_path, 'r', encoding='utf-8') as f:
                         old_record = json.load(f)
+                normalized = {}
+                for k, v in old_record.items():
+                    if isinstance(v, dict):
+                        normalized[k] = {'status': v.get('status', ''), 'err': v.get('err', '')}
+                    else:
+                        normalized[k] = {'status': str(v), 'err': ''}
                 with self.record_lock:
-                    self.record_cache.update(old_record)
+                    self.record_cache.update(normalized)
             except Exception as e:
-                self.log('读取记录失败: %s' % e)
+                self.error('读取记录失败: %s' % e)
         return save_dir, current_chapters, json_path, album_id
 
     def _run_pending(self, pending, save_dir, json_path, album_id, sid):
         if not pending:
-            self.log('范围内没有需要下载的章节')
+            self.status('范围内没有需要下载的章节')
             return
 
         if self.max_workers == 1:
@@ -1098,7 +1127,7 @@ class DownloadApp:
                 if sid != self.session_id or self.stop_event.is_set():
                     break
                 if self.paused_event.is_set():
-                    self.log('下载已暂停, 按[恢复]继续')
+                    self.status('已暂停, 按[恢复]继续')
                     while self.paused_event.is_set() and not self.stop_event.is_set():
                         time.sleep(1)
                     if self.stop_event.is_set() or sid != self.session_id:
@@ -1137,7 +1166,7 @@ class DownloadApp:
                     try:
                         future.result(timeout=0)
                     except Exception as e:
-                        self.log('章节 %d 下载异常: %s' % (chap_num, e))
+                        self.error('章节 %d 下载异常: %s' % (chap_num, e))
             if self.paused_event.is_set() and not active:
                 time.sleep(0.5)
                 continue
@@ -1161,13 +1190,14 @@ class DownloadApp:
             for i in range(start, end + 1):
                 if i - 1 >= len(current_chapters):
                     continue
-                if str(i) not in snapshot or snapshot[str(i)] != '完成':
+                entry = snapshot.get(str(i))
+                if entry is None or not self._is_done(entry):
                     pending.append((i, current_chapters[i - 1]))
             self._run_pending(pending, save_dir, json_path, album_id, sid)
             if sid == self.session_id:
                 self.flush_record(json_path)
         except Exception as e:
-            self.log('下载工作线程异常: %s' % e)
+            self.error('下载工作线程异常: %s' % e)
         finally:
             self.download_finished(sid)
 
@@ -1184,7 +1214,7 @@ class DownloadApp:
             if sid == self.session_id:
                 self.flush_record(json_path)
         except Exception as e:
-            self.log('下载工作线程异常: %s' % e)
+            self.error('下载工作线程异常: %s' % e)
         finally:
             self.download_finished(sid)
 
@@ -1210,7 +1240,7 @@ class DownloadApp:
         except tk.TclError:
             pass
 
-        self.log('下载任务已停止' if stopped else '所有任务已完成')
+        self.status('下载已停止' if stopped else '所有任务已完成')
         self._update_stats_from_cache()
         self.download_thread = None
         if self.close_waiting:
@@ -1221,16 +1251,19 @@ class DownloadApp:
             except tk.TclError:
                 pass
 
-    def update_chapter_status(self, chapter_num, status):
+    def update_chapter_status(self, chapter_num, status, err=''):
         if self.destroyed:
             return
+        text = status
+        if status == '失败' and err:
+            text = '失败: %s' % err
 
         def _update():
             try:
                 with self.chapter_items_lock:
                     item_id = self.chapter_items.get(chapter_num)
                 if item_id:
-                    self.chapter_tree.set(item_id, 'status', status)
+                    self.chapter_tree.set(item_id, 'status', text)
             except tk.TclError:
                 pass
 
@@ -1251,21 +1284,42 @@ class DownloadApp:
             self.paused_event.clear()
             with self.downloading_lock:
                 self.session_id += 1
-            self.log('正在停止下载任务...')
+            self.status('正在停止下载任务...')
             if self.download_thread and self.download_thread.is_alive():
                 self.download_thread.join(timeout=3)
             self.flush_record()
-            if not self.destroyed:
-                self.destroyed = True
-                self.root.destroy()
-        else:
-            self.destroyed = True
-            self.root.destroy()
+        try:
+            with self._err_lock:
+                if self._err_fp:
+                    self._err_fp.close()
+                    self._err_fp = None
+        except Exception:
+            pass
+        self.destroyed = True
+        self.root.destroy()
 
 
 def main():
     root = tk.Tk()
-    DownloadApp(root)
+    app = DownloadApp(root)
+
+    def _excepthook(exc_type, exc_value, exc_tb):
+        msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        try:
+            app.error('未捕获异常:\n%s' % msg)
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    def _thread_excepthook(args):
+        msg = ''.join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))
+        try:
+            app.error('线程异常:\n%s' % msg)
+        except Exception:
+            pass
+
+    sys.excepthook = _excepthook
+    threading.excepthook = _thread_excepthook
     root.mainloop()
 
 

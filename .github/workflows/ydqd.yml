@@ -23,25 +23,10 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt
 
-      - name: 缓存Token与设备ID
-        uses: actions/cache@v4
-        with:
-          path: |
-            ydqd/yunpan_device_ids.json
-            ydqd/data/yunpan_token_cache.json
-          key: caiyun-cache
-
       - name: 执行签到
         env:
           yunpan: ${{ secrets.YUNPAN_TOKEN }}
+          yunpan_device_id: ${{ secrets.YUNPAN_DEVICE_ID }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python yunpan.py
-
-      - name: 输出 deviceId
-        if: always()
-        run: |
-          echo "### deviceId 信息" >> $GITHUB_STEP_SUMMARY
-          echo '```json' >> $GITHUB_STEP_SUMMARY
-          cat yunpan_device_ids.json >> $GITHUB_STEP_SUMMARY || echo "未生成"
-          echo '```' >> $GITHUB_STEP_SUMMARY

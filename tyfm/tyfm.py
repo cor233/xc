@@ -417,8 +417,8 @@ class DownloadApp:
     def __init__(self, root):
         self.root = root
         self.root.title('听友FM下载器')
-        self.root.geometry('1000x720')
-        self.root.minsize(820, 580)
+        self.root.geometry('1280x800')
+        self.root.minsize(1100, 700)
 
         self.search_results = []
         self.current_book = None
@@ -488,12 +488,12 @@ class DownloadApp:
         result_frame.pack(fill=tk.BOTH, expand=True)
         self.result_tree = ttk.Treeview(result_frame, columns=('title', 'narrator'),
                                         show='tree headings', height=20)
-        self.result_tree.heading('#0', text='序号')
-        self.result_tree.heading('title', text='书名')
-        self.result_tree.heading('narrator', text='演播')
-        self.result_tree.column('#0', width=50)
-        self.result_tree.column('title', width=320)
-        self.result_tree.column('narrator', width=160)
+        self.result_tree.heading('#0', text='序号', anchor=tk.CENTER)
+        self.result_tree.heading('title', text='书名', anchor=tk.CENTER)
+        self.result_tree.heading('narrator', text='演播', anchor=tk.CENTER)
+        self.result_tree.column('#0', width=60, anchor=tk.CENTER)
+        self.result_tree.column('title', width=320, anchor=tk.CENTER)
+        self.result_tree.column('narrator', width=160, anchor=tk.CENTER)
         self.result_tree.bind('<<TreeviewSelect>>', self.on_book_select)
         sl = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.result_tree.yview)
         self.result_tree.configure(yscrollcommand=sl.set)
@@ -504,7 +504,10 @@ class DownloadApp:
         pane.add(left, weight=1)
 
         right = ttk.LabelFrame(pane, text='章节列表')
-        ctrl = ttk.Frame(right)
+        ctrl_wrap = ttk.Frame(right)
+        ctrl_wrap.pack(fill=tk.X, pady=5)
+        ctrl = ttk.Frame(ctrl_wrap)
+        ctrl.pack(anchor=tk.CENTER)
         ttk.Label(ctrl, text='起始:').pack(side=tk.LEFT, padx=2)
         self.start_entry = ttk.Entry(ctrl, width=6)
         self.start_entry.pack(side=tk.LEFT, padx=2)
@@ -520,18 +523,17 @@ class DownloadApp:
         self.retry_btn = ttk.Button(ctrl, text='重试失败', command=self.retry_failed)
         self.retry_btn.pack(side=tk.LEFT, padx=5)
         ttk.Button(ctrl, text='停止', command=self.stop_download).pack(side=tk.LEFT, padx=5)
-        ctrl.pack(fill=tk.X, pady=5, padx=5, anchor=tk.W)
 
         chap_frame = ttk.Frame(right)
         chap_frame.pack(fill=tk.BOTH, expand=True)
         self.chapter_tree = ttk.Treeview(chap_frame, columns=('index', 'title', 'status'),
                                          show='headings', selectmode='none')
-        self.chapter_tree.heading('index', text='序号')
-        self.chapter_tree.heading('title', text='章节名')
-        self.chapter_tree.heading('status', text='状态')
-        self.chapter_tree.column('index', width=60)
-        self.chapter_tree.column('title', width=360)
-        self.chapter_tree.column('status', width=80)
+        self.chapter_tree.heading('index', text='序号', anchor=tk.CENTER)
+        self.chapter_tree.heading('title', text='章节名', anchor=tk.CENTER)
+        self.chapter_tree.heading('status', text='状态', anchor=tk.CENTER)
+        self.chapter_tree.column('index', width=70, anchor=tk.CENTER)
+        self.chapter_tree.column('title', width=380, anchor=tk.CENTER)
+        self.chapter_tree.column('status', width=100, anchor=tk.CENTER)
         sr = ttk.Scrollbar(chap_frame, orient=tk.VERTICAL, command=self.chapter_tree.yview)
         self.chapter_tree.configure(yscrollcommand=sr.set)
         self.chapter_tree.grid(row=0, column=0, sticky='nsew')

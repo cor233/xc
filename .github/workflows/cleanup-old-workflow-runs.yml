@@ -15,4 +15,5 @@ jobs:
       - name: Delete workflow runs
         uses: iamazeem/delete-workflow-runs-action@v1
         with:
-          keep: 0 # 删除全部运行记录
+          keep: 1              # 保留最新 1 条（即本次运行）
+          status: completed

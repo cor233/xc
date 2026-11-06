@@ -26,13 +26,11 @@ LOG_FILE = 'tyfm.log'
 
 _DISK_LOCK = threading.Lock()
 
-
 def LOG(msg):
     try:
         print('[tyfm]', msg)
     except Exception:
         pass
-
 
 def get_data_dir():
     exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
@@ -52,13 +50,11 @@ def get_data_dir():
             continue
     return os.path.expanduser('~')
 
-
 APP_DIR = get_data_dir()
 
 _WIN_RESERVED = {'CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5',
                  'COM6', 'COM7', 'COM8', 'COM9', 'LPT1', 'LPT2', 'LPT3', 'LPT4',
                  'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'}
-
 
 def sanitize_name(name):
     name = re.sub(r'[\\/:*?"<>|\r\n\t]', '_', name or '').strip()
@@ -70,7 +66,6 @@ def sanitize_name(name):
     while len(name.encode('utf-8')) > 200:
         name = name[:-1]
     return name
-
 
 class SourceClient:
 
@@ -208,7 +203,6 @@ class SourceClient:
             raise RuntimeError('play_url 未返回: %s' % j)
         return url
 
-
 def _probe_file(url, headers, timeout):
     try:
         r = requests.get(url, headers=headers, stream=True, timeout=timeout)
@@ -233,7 +227,6 @@ def _probe_file(url, headers, timeout):
     except Exception:
         return None, False, ''
 
-
 def _download_range(url, headers, start, end, save_path, stop_event, timeout):
     h = dict(headers)
     h['Range'] = 'bytes=%d-%d' % (start, end)
@@ -257,13 +250,11 @@ def _download_range(url, headers, start, end, save_path, stop_event, timeout):
     except Exception:
         return -1
 
-
 def _interruptible_sleep(stop_event, secs):
     if stop_event:
         return stop_event.wait(secs)
     time.sleep(secs)
     return False
-
 
 def download_audio(url, save_path, retry=3, status_cb=None, stop_event=None,
                    connect_timeout=10, read_timeout=60, segments=2):
@@ -275,9 +266,6 @@ def download_audio(url, save_path, retry=3, status_cb=None, stop_event=None,
         'Accept-Encoding': 'identity',
     }
     last_err = ['']
-
-    def _set_err(msg):
-        last_err[0] = msg
 
     def _single_download():
         r = requests.get(url, headers=headers, stream=True, timeout=(connect_timeout, read_timeout))
@@ -391,7 +379,7 @@ def download_audio(url, save_path, retry=3, status_cb=None, stop_event=None,
         except InterruptedError:
             return False, '已取消'
         except Exception as e:
-            _set_err(str(e) or '下载失败')
+            last_err[0] = str(e) or '下载失败'
             if attempt == retry - 1:
                 return False, last_err[0]
             if _interruptible_sleep(stop_event, 10):
@@ -405,14 +393,13 @@ def download_audio(url, save_path, retry=3, status_cb=None, stop_event=None,
                         pass
     return False, last_err[0] or '下载失败'
 
-
 class DownloadApp:
 
     def __init__(self, root):
         self.root = root
         self.root.title('听友FM下载器')
         self.root.geometry('1100x660')
-        self.root.minsize(1100, 680)
+        self.root.minsize(1100, 660)
 
         self.search_results = []
         self.current_book = None
@@ -483,15 +470,19 @@ class DownloadApp:
         left = ttk.LabelFrame(pane, text='搜索结果')
         result_frame = ttk.Frame(left)
         result_frame.pack(fill=tk.BOTH, expand=True)
-        self.result_tree = ttk.Treeview(result_frame, columns=('title', 'narrator'),
-                                        show='tree headings', height=20)
-        self.result_tree.heading('#0', text='序号', anchor=tk.CENTER)
+        
+        self.result_tree = ttk.Treeview(result_frame, columns=('idx', 'title', 'narrator'),
+                                        show='headings', height=20)
+        self.result_tree.heading('idx', text='序号', anchor=tk.CENTER)
         self.result_tree.heading('title', text='书名', anchor=tk.CENTER)
         self.result_tree.heading('narrator', text='演播', anchor=tk.CENTER)
-        self.result_tree.column('#0', width=60, anchor=tk.CENTER)
-        self.result_tree.column('title', width=320, anchor=tk.CENTER)
-        self.result_tree.column('narrator', width=160, anchor=tk.CENTER)
+        
+        self.result_tree.column('idx', width=60, minwidth=50, anchor=tk.CENTER, stretch=False)
+        self.result_tree.column('title', width=280, minwidth=200, anchor=tk.CENTER, stretch=True)
+        self.result_tree.column('narrator', width=160, minwidth=100, anchor=tk.CENTER, stretch=True)
+        
         self.result_tree.bind('<<TreeviewSelect>>', self.on_book_select)
+        
         sl = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.result_tree.yview)
         self.result_tree.configure(yscrollcommand=sl.set)
         self.result_tree.grid(row=0, column=0, sticky='nsew')
@@ -523,14 +514,17 @@ class DownloadApp:
 
         chap_frame = ttk.Frame(right)
         chap_frame.pack(fill=tk.BOTH, expand=True)
+        
         self.chapter_tree = ttk.Treeview(chap_frame, columns=('index', 'title', 'status'),
                                          show='headings', selectmode='none')
         self.chapter_tree.heading('index', text='序号', anchor=tk.CENTER)
         self.chapter_tree.heading('title', text='章节名', anchor=tk.CENTER)
         self.chapter_tree.heading('status', text='状态', anchor=tk.CENTER)
-        self.chapter_tree.column('index', width=70, anchor=tk.CENTER)
-        self.chapter_tree.column('title', width=380, anchor=tk.CENTER)
-        self.chapter_tree.column('status', width=120, anchor=tk.CENTER)
+        
+        self.chapter_tree.column('index', width=60, minwidth=50, anchor=tk.CENTER, stretch=False)
+        self.chapter_tree.column('title', width=300, minwidth=200, anchor=tk.CENTER, stretch=True)
+        self.chapter_tree.column('status', width=130, minwidth=100, anchor=tk.CENTER, stretch=False)
+        
         sr = ttk.Scrollbar(chap_frame, orient=tk.VERTICAL, command=self.chapter_tree.yview)
         self.chapter_tree.configure(yscrollcommand=sr.set)
         self.chapter_tree.grid(row=0, column=0, sticky='nsew')
@@ -610,6 +604,18 @@ class DownloadApp:
     def _is_done(cls, entry):
         return cls._record_status(entry) == '完成'
 
+    @classmethod
+    def _normalize_record(cls, record):
+        normalized = {}
+        if not isinstance(record, dict):
+            return normalized
+        for k, v in record.items():
+            if isinstance(v, dict):
+                normalized[k] = {'status': v.get('status', ''), 'err': v.get('err', '')}
+            else:
+                normalized[k] = {'status': str(v), 'err': ''}
+        return normalized
+
     def select_folder(self):
         folder = filedialog.askdirectory()
         if folder:
@@ -620,7 +626,7 @@ class DownloadApp:
             return
         keyword = self.search_entry.get().strip()
         if not keyword:
-            messagebox.showwarning('提示', '请输入搜索内容')
+            messagebox.showwarning('提示', '请输入搜索关键词')
             return
         self._searching = True
         self.search_btn.config(state='disabled')
@@ -666,12 +672,9 @@ class DownloadApp:
             self.status('未找到专辑')
             return
         for idx, b in enumerate(books, start=1):
-            self.result_tree.insert('', tk.END, text=str(idx),
-                                    values=(b['title'], b['narrator']),
+            self.result_tree.insert('', tk.END, values=(idx, b['title'], b['narrator']),
                                     iid=str(idx))
         self.status('找到 %d 个专辑' % len(books))
-        if len(books) == 1:
-            self.root.after(100, lambda: self.result_tree.selection_set('1'))
 
     def on_book_select(self, event):
         should_stop = False
@@ -719,6 +722,7 @@ class DownloadApp:
         token = self.load_token
 
         def load():
+            self.status('正在获取章节列表...')
             try:
                 chapters = self.client.get_chapters(book)
             except Exception as e:
@@ -820,15 +824,12 @@ class DownloadApp:
                 with self.json_lock:
                     with open(json_path, 'r', encoding='utf-8') as f:
                         record = json.load(f)
-                normalized = {}
-                for k, v in record.items():
-                    if isinstance(v, dict):
-                        normalized[k] = {'status': v.get('status', ''), 'err': v.get('err', '')}
-                    else:
-                        normalized[k] = {'status': str(v), 'err': ''}
-                    if normalized[k]['status'] == '完成':
+                normalized = self._normalize_record(record)
+                for entry in normalized.values():
+                    st = self._record_status(entry)
+                    if st == '完成':
                         completed += 1
-                    elif normalized[k]['status'] == '失败':
+                    elif st == '失败':
                         failed += 1
                 with self.record_lock:
                     self.record_cache.clear()
@@ -860,10 +861,10 @@ class DownloadApp:
                 item_id = items.get(int(key))
                 if not item_id:
                     continue
-                status = self._record_status(entry)
+                st = self._record_status(entry)
                 err = self._record_err(entry)
-                text = status
-                if status == '失败' and err:
+                text = st
+                if st == '失败' and err:
                     text = '失败: %s' % err
                 try:
                     self.chapter_tree.set(item_id, 'status', text)
@@ -1105,12 +1106,7 @@ class DownloadApp:
                 with self.json_lock:
                     with open(json_path, 'r', encoding='utf-8') as f:
                         old_record = json.load(f)
-                normalized = {}
-                for k, v in old_record.items():
-                    if isinstance(v, dict):
-                        normalized[k] = {'status': v.get('status', ''), 'err': v.get('err', '')}
-                    else:
-                        normalized[k] = {'status': str(v), 'err': ''}
+                normalized = self._normalize_record(old_record)
                 with self.record_lock:
                     self.record_cache.update(normalized)
             except Exception as e:
@@ -1298,7 +1294,6 @@ class DownloadApp:
         self.destroyed = True
         self.root.destroy()
 
-
 def main():
     root = tk.Tk()
     app = DownloadApp(root)
@@ -1321,7 +1316,6 @@ def main():
     sys.excepthook = _excepthook
     threading.excepthook = _thread_excepthook
     root.mainloop()
-
 
 if __name__ == '__main__':
     main()

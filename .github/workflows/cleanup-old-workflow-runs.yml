@@ -1,19 +1,19 @@
 name: Cleanup Old Workflow Runs
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 仅手动触发
 
 jobs:
   cleanup:
     runs-on: ubuntu-latest
     permissions:
-      actions: write
+      actions: write # 必需权限，用于删除运行记录
     steps:
-      - name: Checkout repository
+      - name: 检出仓库代码
         uses: actions/checkout@v4
 
-      - name: Delete workflow runs
+      - name: 清理历史运行记录
         uses: iamazeem/delete-workflow-runs-action@v1
         with:
-          keep: 1              # 保留最新 1 条（即本次运行）
-          status: completed
+          keep: 1            # 保留最新 1 条（本次运行），删除其余全部
+          status: completed  # 只处理已完成的记录，避开 in_progress

@@ -11,7 +11,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
-
 APP_UA = 'okhttp/4.9.3'
 BROWSER_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
               'AppleWebKit/537.36 (KHTML, like Gecko) '
@@ -25,13 +24,11 @@ META_KEYS = ('id', 'title', 'cover_url', 'teller', 'author', 'count', 'descripti
 
 _DISK_LOCK = threading.Lock()
 
-
 def LOG(msg):
     try:
         print('[syp]', msg)
     except Exception:
         pass
-
 
 def get_data_dir():
     exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
@@ -51,13 +48,11 @@ def get_data_dir():
             continue
     return os.path.expanduser('~')
 
-
 APP_DIR = get_data_dir()
 
 _WIN_RESERVED = {'CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5',
                  'COM6', 'COM7', 'COM8', 'COM9', 'LPT1', 'LPT2', 'LPT3', 'LPT4',
                  'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'}
-
 
 def sanitize_name(name):
     name = re.sub(r'[\\/:*?"<>|\r\n\t]', '_', name or '').strip()
@@ -69,7 +64,6 @@ def sanitize_name(name):
     while len(name.encode('utf-8')) > 200:
         name = name[:-1]
     return name
-
 
 class SourceClient:
 
@@ -339,7 +333,6 @@ class SourceClient:
     def get_audio_url(self, chap):
         return '%s/tingyou/stream?album=%s&idx=%s' % (API, chap['album_id'], chap['track_no'])
 
-
 def _probe_file(url, headers, timeout):
     try:
         r = requests.get(url, headers=headers, stream=True, timeout=timeout)
@@ -363,7 +356,6 @@ def _probe_file(url, headers, timeout):
             r.close()
     except Exception:
         return None, False, ''
-
 
 def _download_range(url, headers, start, end, save_path, stop_event, timeout):
     h = dict(headers)
@@ -390,13 +382,11 @@ def _download_range(url, headers, start, end, save_path, stop_event, timeout):
     except Exception:
         return -1
 
-
 def _interruptible_sleep(stop_event, secs):
     if stop_event:
         return stop_event.wait(secs)
     time.sleep(secs)
     return False
-
 
 def download_audio(url, save_path, retry=3, status_cb=None, stop_event=None,
                    connect_timeout=10, read_timeout=60, segments=2):
@@ -540,7 +530,6 @@ def download_audio(url, save_path, retry=3, status_cb=None, stop_event=None,
                         pass
     return False, last_err[0] or '下载失败'
 
-
 class DownloadApp:
 
     def __init__(self, root):
@@ -618,15 +607,19 @@ class DownloadApp:
         left = ttk.LabelFrame(pane, text='搜索结果')
         result_frame = ttk.Frame(left)
         result_frame.pack(fill=tk.BOTH, expand=True)
-        self.result_tree = ttk.Treeview(result_frame, columns=('title', 'narrator'),
-                                        show='tree headings', height=20)
-        self.result_tree.heading('#0', text='序号', anchor=tk.CENTER)
+        
+        self.result_tree = ttk.Treeview(result_frame, columns=('idx', 'title', 'narrator'),
+                                        show='headings', height=20)
+        self.result_tree.heading('idx', text='序号', anchor=tk.CENTER)
         self.result_tree.heading('title', text='书名', anchor=tk.CENTER)
         self.result_tree.heading('narrator', text='演播', anchor=tk.CENTER)
-        self.result_tree.column('#0', width=60, anchor=tk.CENTER)
-        self.result_tree.column('title', width=320, anchor=tk.CENTER)
-        self.result_tree.column('narrator', width=160, anchor=tk.CENTER)
+        
+        self.result_tree.column('idx', width=60, minwidth=50, anchor=tk.CENTER, stretch=False)
+        self.result_tree.column('title', width=280, minwidth=200, anchor=tk.CENTER, stretch=True)
+        self.result_tree.column('narrator', width=160, minwidth=100, anchor=tk.CENTER, stretch=True)
+        
         self.result_tree.bind('<<TreeviewSelect>>', self.on_book_select)
+        
         sl = ttk.Scrollbar(result_frame, orient=tk.VERTICAL, command=self.result_tree.yview)
         self.result_tree.configure(yscrollcommand=sl.set)
         self.result_tree.grid(row=0, column=0, sticky='nsew')
@@ -658,14 +651,17 @@ class DownloadApp:
 
         chap_frame = ttk.Frame(right)
         chap_frame.pack(fill=tk.BOTH, expand=True)
+        
         self.chapter_tree = ttk.Treeview(chap_frame, columns=('index', 'title', 'status'),
                                          show='headings', selectmode='none')
         self.chapter_tree.heading('index', text='序号', anchor=tk.CENTER)
         self.chapter_tree.heading('title', text='章节名', anchor=tk.CENTER)
         self.chapter_tree.heading('status', text='状态', anchor=tk.CENTER)
-        self.chapter_tree.column('index', width=70, anchor=tk.CENTER)
-        self.chapter_tree.column('title', width=380, anchor=tk.CENTER)
-        self.chapter_tree.column('status', width=120, anchor=tk.CENTER)
+        
+        self.chapter_tree.column('index', width=60, minwidth=50, anchor=tk.CENTER, stretch=False)
+        self.chapter_tree.column('title', width=300, minwidth=200, anchor=tk.CENTER, stretch=True)
+        self.chapter_tree.column('status', width=130, minwidth=100, anchor=tk.CENTER, stretch=False)
+        
         sr = ttk.Scrollbar(chap_frame, orient=tk.VERTICAL, command=self.chapter_tree.yview)
         self.chapter_tree.configure(yscrollcommand=sr.set)
         self.chapter_tree.grid(row=0, column=0, sticky='nsew')
@@ -813,8 +809,7 @@ class DownloadApp:
             self.status('未找到书籍')
             return
         for idx, b in enumerate(books, start=1):
-            self.result_tree.insert('', tk.END, text=str(idx),
-                                    values=(b['title'], b['narrator']),
+            self.result_tree.insert('', tk.END, values=(idx, b['title'], b['narrator']),
                                     iid=str(idx))
         self.status('找到 %d 本书籍' % len(books))
 
@@ -1435,7 +1430,6 @@ class DownloadApp:
         self.destroyed = True
         self.root.destroy()
 
-
 def main():
     root = tk.Tk()
     app = DownloadApp(root)
@@ -1458,7 +1452,6 @@ def main():
     sys.excepthook = _excepthook
     threading.excepthook = _thread_excepthook
     root.mainloop()
-
 
 if __name__ == '__main__':
     main()

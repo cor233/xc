@@ -411,7 +411,7 @@ class DownloadApp:
     def __init__(self, root):
         self.root = root
         self.root.title('听友FM下载器')
-        self.root.geometry('1280x760')
+        self.root.geometry('1100x660')
         self.root.minsize(1100, 680)
 
         self.search_results = []

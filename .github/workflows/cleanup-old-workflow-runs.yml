@@ -9,6 +9,11 @@ jobs:
     permissions:
       actions: write # 必需权限，用于删除运行记录
     steps:
-      - uses: iamazeem/delete-workflow-runs-action@v1
+      # 👇 新增这一步，让 gh 命令能识别出当前仓库
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Delete workflow runs
+        uses: iamazeem/delete-workflow-runs-action@v1
         with:
-          keep: 0 # 可选：每个工作流保留最近5次运行，其余删除。设为0或不设则删除全部。
+          keep: 0 # 删除全部运行记录

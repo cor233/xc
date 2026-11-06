@@ -1,15 +1,14 @@
 name: Cleanup Old Workflow Runs
 
 on:
-  workflow_dispatch: # 仅手动触发
+  workflow_dispatch:
 
 jobs:
   cleanup:
     runs-on: ubuntu-latest
     permissions:
-      actions: write # 必需权限，用于删除运行记录
+      actions: write
     steps:
-      # 👇 新增这一步，让 gh 命令能识别出当前仓库
       - name: Checkout repository
         uses: actions/checkout@v4
 

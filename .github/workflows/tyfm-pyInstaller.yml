@@ -21,11 +21,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller requests
 
-      - name: 打包成 EXE (文件夹模式)
-        run: pyinstaller --onedir --noupx --name tyfm --windowed tyfm/tyfm.py
+      - name: 使用 PyInstaller 打包
+        run: |
+          pyinstaller --onedir --noupx --windowed --name "tyfm" tyfm/tyfm.py
 
       - name: 上传 Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tyfm
+          name: tyfm-pyinstaller
           path: dist/tyfm/

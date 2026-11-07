@@ -20,7 +20,7 @@ TY = API + '/tingyou-app'
 DEVICE_PREFIX = 'tvbox-tingshijie-'
 CACHE_FILE = 'syp_cache.json'
 LOG_FILE = 'syp.log'
-META_KEYS = ('id', 'title', 'cover_url', 'teller', 'author', 'count', 'description')
+META_KEYS = ('id', 'title', 'teller', 'count')
 
 _DISK_LOCK = threading.Lock()
 
@@ -534,7 +534,7 @@ class DownloadApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title('拾音盘下载器')
+        self.root.title('拾音盘音频下载器')
         self.root.geometry('1100x660')
         self.root.minsize(1100, 660)
 
@@ -660,7 +660,7 @@ class DownloadApp:
         
         self.chapter_tree.column('index', width=60, minwidth=50, anchor=tk.CENTER, stretch=False)
         self.chapter_tree.column('title', width=300, minwidth=200, anchor=tk.CENTER, stretch=True)
-        self.chapter_tree.column('status', width=130, minwidth=100, anchor=tk.CENTER, stretch=False)
+        self.chapter_tree.column('status', width=80, minwidth=70, anchor=tk.CENTER, stretch=False)
         
         sr = ttk.Scrollbar(chap_frame, orient=tk.VERTICAL, command=self.chapter_tree.yview)
         self.chapter_tree.configure(yscrollcommand=sr.set)
@@ -999,12 +999,8 @@ class DownloadApp:
                 if not item_id:
                     continue
                 st = self._record_status(entry)
-                err = self._record_err(entry)
-                text = st
-                if st == '失败' and err:
-                    text = '失败: %s' % err
                 try:
-                    self.chapter_tree.set(item_id, 'status', text)
+                    self.chapter_tree.set(item_id, 'status', st)
                 except tk.TclError:
                     pass
 
@@ -1182,7 +1178,7 @@ class DownloadApp:
             self.status('失败: %s (%s)' % (chap_title, url_err))
             with self.record_lock:
                 self.record_cache[key] = {'status': '失败', 'err': url_err}
-            self.update_chapter_status(chap_num, '失败', url_err)
+            self.update_chapter_status(chap_num, '失败')
             self.flush_record(json_path)
             self._update_stats_from_cache()
             return False, url_err
@@ -1198,7 +1194,7 @@ class DownloadApp:
                 return False, '取消'
             status_entry = {'status': '失败', 'err': err or '下载失败'}
             self.status('失败: %s (%s)' % (chap_title, err or '下载失败'))
-            self.update_chapter_status(chap_num, '失败', err or '下载失败')
+            self.update_chapter_status(chap_num, '失败')
         else:
             status_entry = {'status': '完成', 'err': ''}
             self.status('完成: %s' % filename)
@@ -1386,16 +1382,13 @@ class DownloadApp:
     def update_chapter_status(self, chapter_num, status, err=''):
         if self.destroyed:
             return
-        text = status
-        if status == '失败' and err:
-            text = '失败: %s' % err
 
         def _update():
             try:
                 with self.chapter_items_lock:
                     item_id = self.chapter_items.get(chapter_num)
                 if item_id:
-                    self.chapter_tree.set(item_id, 'status', text)
+                    self.chapter_tree.set(item_id, 'status', status)
             except tk.TclError:
                 pass
 

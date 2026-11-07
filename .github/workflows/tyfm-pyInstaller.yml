@@ -1,4 +1,4 @@
-name: Build TYFM EXE
+name: Build TYFM EXE (PyInstaller)
 
 on:
   workflow_dispatch:

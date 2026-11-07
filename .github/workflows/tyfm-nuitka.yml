@@ -1,0 +1,32 @@
+name: Build TYFM EXE (Nuitka)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install nuitka requests
+
+      - name: 使用 Nuitka 编译
+        run: |
+          python -m nuitka --standalone --windows-disable-console --enable-plugin=tk-inter --remove-output --assume-yes-for-downloads --output-dir=dist tyfm/tyfm.py
+
+      - name: 上传 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tyfm-nuitka
+          path: dist/tyfm.dist/

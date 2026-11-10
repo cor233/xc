@@ -1,4 +1,4 @@
-name: Build SYP WIN EXE
+name: Build SYP EXE（Windows）
 
 on:
   workflow_dispatch:

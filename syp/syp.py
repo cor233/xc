@@ -653,7 +653,7 @@ class DownloadApp:
         chap_frame.pack(fill=tk.BOTH, expand=True)
         
         self.chapter_tree = ttk.Treeview(chap_frame, columns=('index', 'title', 'status'),
-                                         show='headings', selectmode='none')
+                                         show='headings', selectmode='extended')
         self.chapter_tree.heading('index', text='序号', anchor=tk.CENTER)
         self.chapter_tree.heading('title', text='章节名', anchor=tk.CENTER)
         self.chapter_tree.heading('status', text='状态', anchor=tk.CENTER)
@@ -661,6 +661,11 @@ class DownloadApp:
         self.chapter_tree.column('index', width=60, minwidth=50, anchor=tk.CENTER, stretch=False)
         self.chapter_tree.column('title', width=300, minwidth=200, anchor=tk.CENTER, stretch=True)
         self.chapter_tree.column('status', width=80, minwidth=70, anchor=tk.CENTER, stretch=False)
+        
+        self.chapter_tree.bind('<Control-a>', self._select_all_chapters)
+        self.chapter_tree.bind('<Control-A>', self._select_all_chapters)
+        self.chapter_tree.bind('<Control-c>', self._copy_chapters)
+        self.chapter_tree.bind('<Control-C>', self._copy_chapters)
         
         sr = ttk.Scrollbar(chap_frame, orient=tk.VERTICAL, command=self.chapter_tree.yview)
         self.chapter_tree.configure(yscrollcommand=sr.set)
@@ -684,6 +689,25 @@ class DownloadApp:
         status_bar.pack(fill=tk.X, padx=10, pady=(0, 10))
         tk.Label(status_bar, textvariable=self.status_var, anchor=tk.W,
                  relief=tk.SUNKEN, bd=1, padx=6, pady=3).pack(fill=tk.X)
+
+    def _select_all_chapters(self, event=None):
+        self.chapter_tree.selection_set(self.chapter_tree.get_children())
+        return 'break'
+
+    def _copy_chapters(self, event=None):
+        selected = self.chapter_tree.selection()
+        if not selected:
+            return 'break'
+        titles = []
+        for item in selected:
+            vals = self.chapter_tree.item(item, 'values')
+            if len(vals) >= 2:
+                titles.append(str(vals[1]))
+        if titles:
+            text = '\n'.join(titles)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+        return 'break'
 
     def update_max_workers(self):
         val = self.max_workers

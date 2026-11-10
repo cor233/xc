@@ -1,4 +1,4 @@
-name: Build TYFM WIN EXE
+name: Build TYFM EXE（Windows）
 
 on:
   workflow_dispatch:

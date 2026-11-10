@@ -24,7 +24,7 @@ jobs:
     - name: 使用 PyInstaller 打包
       run: |
         cd syp
-        pyinstaller --onedir --noupx --windowed --name "syp" syp.py
+        pyinstaller --onedir --noupx --windowed --icon "icon.ico" --name "syp" syp.py
 
     - name: 上传 Artifact
       uses: actions/upload-artifact@v4

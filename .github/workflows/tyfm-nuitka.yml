@@ -23,7 +23,7 @@ jobs:
 
       - name: 使用 Nuitka 编译
         run: |
-          python -m nuitka --standalone --windows-disable-console --enable-plugin=tk-inter --remove-output --assume-yes-for-downloads --output-dir=dist tyfm/tyfm.py
+          python -m nuitka --standalone --windows-disable-console --enable-plugin=tk-inter --remove-output --assume-yes-for-downloads --output-dir=dist --windows-icon-from-ico=tyfm/icon.ico tyfm/tyfm.py
 
       - name: 上传 Artifact
         uses: actions/upload-artifact@v4

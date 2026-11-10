@@ -9,7 +9,6 @@
         <SolidColorBrush x:Key="TextGray" Color="#5F5F5F"/>
         <SolidColorBrush x:Key="SuccessColor" Color="#107C10"/>
         <SolidColorBrush x:Key="ErrorColor" Color="#C42B1C"/>
-
         <Style x:Key="ModernButton" TargetType="Button">
             <Setter Property="Background" Value="White"/>
             <Setter Property="Foreground" Value="Black"/>
@@ -34,7 +33,6 @@
                 </Setter.Value>
             </Setter>
         </Style>
-
         <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource ModernButton}">
             <Setter Property="Background" Value="{StaticResource PrimaryColor}"/>
             <Setter Property="Foreground" Value="White"/>
@@ -45,7 +43,6 @@
                 </Trigger>
             </Style.Triggers>
         </Style>
-
         <Style TargetType="TextBox">
             <Setter Property="Height" Value="32"/>
             <Setter Property="Padding" Value="8,0"/>
@@ -53,7 +50,6 @@
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="BorderBrush" Value="#DDDDDD"/>
         </Style>
-
         <Style TargetType="DataGrid">
             <Setter Property="Background" Value="White"/>
             <Setter Property="RowBackground" Value="White"/>
@@ -70,7 +66,6 @@
             <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True"/>
             <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling"/>
         </Style>
-        
         <Style TargetType="DataGridColumnHeader">
             <Setter Property="Background" Value="#F9F9F9"/>
             <Setter Property="Padding" Value="10,8"/>

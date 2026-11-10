@@ -24,7 +24,7 @@ jobs:
     - name: 使用 Nuitka 编译
       run: |
         cd syp
-        python -m nuitka --standalone --windows-disable-console --enable-plugin=tk-inter --remove-output --assume-yes-for-downloads --output-dir=dist syp.py
+        python -m nuitka --standalone --windows-disable-console --enable-plugin=tk-inter --remove-output --assume-yes-for-downloads --output-dir=dist --windows-icon-from-ico=icon.ico syp.py
 
     - name: 上传 Artifact
       uses: actions/upload-artifact@v4

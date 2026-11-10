@@ -1,0 +1,24 @@
+name: Build TYFM WIN EXE
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tyfm/**'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+    - name: Publish
+      run: dotnet publish tyfm/tyfm.csproj -c Release -r win-x64 -p:PublishSingleFile=true --self-contained true -o ./publish-tyfm
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: tyfm-exe
+        path: ./publish-tyfm/tyfm.exe

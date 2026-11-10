@@ -1,0 +1,93 @@
+<Window x:Class="Tyfm.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="拾音盘下载器" Height="700" Width="1100" Background="{StaticResource WindowBg}"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,16">
+            <TextBlock Text="搜索:" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource TextGray}"/>
+            <TextBox x:Name="SearchBox" Width="250" />
+            <Button x:Name="SearchBtn" Content="搜索" Style="{StaticResource ModernButton}" Margin="8,0,24,0"/>
+            
+            <TextBlock Text="保存目录:" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource TextGray}"/>
+            <TextBox x:Name="FolderBox" Width="220" />
+            <Button x:Name="BrowseBtn" Content="浏览" Style="{StaticResource ModernButton}" Margin="8,0,24,0"/>
+            
+            <TextBlock Text="并发:" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource TextGray}"/>
+            <TextBox x:Name="ConcurrencyBox" Width="50" TextAlignment="Center" />
+        </StackPanel>
+
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="1*"/>
+                <ColumnDefinition Width="16"/>
+                <ColumnDefinition Width="1*"/>
+            </Grid.ColumnDefinitions>
+
+            <Border Grid.Column="0" Background="{StaticResource CardBg}" CornerRadius="8" Padding="1">
+                <Border.Effect><DropShadowEffect Color="Black" Opacity="0.05" BlurRadius="10" ShadowDepth="2"/></Border.Effect>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <TextBlock Text="搜索结果" FontWeight="Bold" Margin="12,10" FontSize="14"/>
+                    <DataGrid x:Name="ResultGrid" Grid.Row="1" Margin="0">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="序号" Binding="{Binding Idx}" Width="60" />
+                            <DataGridTextColumn Header="书名" Binding="{Binding Title}" Width="*" />
+                            <DataGridTextColumn Header="演播" Binding="{Binding Narrator}" Width="140" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <Border Grid.Row="2" Background="#F9F9F9" BorderBrush="#EEEEEE" BorderThickness="0,1,0,0">
+                        <TextBlock x:Name="LeftStatus" Text="就绪" Margin="12,6" Foreground="{StaticResource TextGray}"/>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="2" Background="{StaticResource CardBg}" CornerRadius="8" Padding="1">
+                <Border.Effect><DropShadowEffect Color="Black" Opacity="0.05" BlurRadius="10" ShadowDepth="2"/></Border.Effect>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10">
+                        <TextBlock Text="起始:" VerticalAlignment="Center" Foreground="{StaticResource TextGray}"/>
+                        <TextBox x:Name="StartBox" Width="50" TextAlignment="Center" Margin="4,0,12,0" />
+                        <TextBlock Text="结束:" VerticalAlignment="Center" Foreground="{StaticResource TextGray}"/>
+                        <TextBox x:Name="EndBox" Width="50" TextAlignment="Center" Margin="4,0,16,0" />
+                        <Button x:Name="DownloadBtn" Content="下载" Style="{StaticResource PrimaryButton}" Margin="0,0,8,0"/>
+                        <Button Content="暂停" Style="{StaticResource ModernButton}" Margin="0,0,8,0"/>
+                        <Button x:Name="RetryBtn" Content="重试失败" Style="{StaticResource ModernButton}" Margin="0,0,8,0"/>
+                        <Button x:Name="StopBtn" Content="停止" Style="{StaticResource ModernButton}"/>
+                    </StackPanel>
+                    <DataGrid x:Name="ChapterGrid" Grid.Row="1" Margin="0">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="序号" Binding="{Binding Index}" Width="60" />
+                            <DataGridTextColumn Header="章节名" Binding="{Binding Title}" Width="*" />
+                            <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="100" />
+                        </DataGrid.Columns>
+                    </DataGrid>
+                    <Border Grid.Row="2" Background="#F9F9F9" BorderBrush="#EEEEEE" BorderThickness="0,1,0,0">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="12,6">
+                            <TextBlock Text="总数: " Foreground="{StaticResource TextGray}"/>
+                            <TextBlock x:Name="TotalCount" Text="0" Foreground="{StaticResource PrimaryColor}" FontWeight="Bold" Margin="0,0,24,0"/>
+                            <TextBlock Text="完成: " Foreground="{StaticResource TextGray}"/>
+                            <TextBlock x:Name="DoneCount" Text="0" Foreground="{StaticResource SuccessColor}" FontWeight="Bold" Margin="0,0,24,0"/>
+                            <TextBlock Text="失败: " Foreground="{StaticResource TextGray}"/>
+                            <TextBlock x:Name="FailCount" Text="0" Foreground="{StaticResource ErrorColor}" FontWeight="Bold"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

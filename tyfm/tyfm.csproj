@@ -10,5 +10,6 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <ApplicationIcon>icon.ico</ApplicationIcon>
     <AssemblyName>tyfm</AssemblyName>
+    <RootNamespace>tyfm</RootNamespace>
   </PropertyGroup>
 </Project>

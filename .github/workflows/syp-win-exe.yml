@@ -1,4 +1,4 @@
-name: Build SYP EXE（Windows）
+name: Build SYP EXE（Windows Green）
 
 on:
   workflow_dispatch:
@@ -16,9 +16,11 @@ jobs:
       with:
         dotnet-version: '8.0.x'
     - name: Publish
-      run: dotnet publish syp/syp.csproj -c Release -r win-x64 -p:PublishSingleFile=true --self-contained true -o ./publish-syp
+      run: dotnet publish syp/syp.csproj -c Release -r win-x64 --self-contained true -o ./publish-syp
+    - name: Zip Output
+      run: Compress-Archive -Path ./publish-syp/* -DestinationPath ./syp.zip
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: syp-exe
-        path: ./publish-syp/syp.exe
+        name: syp-green
+        path: ./syp.zip

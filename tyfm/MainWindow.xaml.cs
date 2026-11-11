@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Input;
 using System.Windows.Threading;
 
 namespace tyfm
@@ -52,23 +53,55 @@ namespace tyfm
             uiTimer.Tick += (s, e) => UpdateStats();
         }
 
-        private JsonElement? FindList(JsonElement element)
+        private void ChapterGrid_PreviewKeyDown(object sender, KeyEventArgs e)
         {
-            if (element.ValueKind == JsonValueKind.Object)
+            if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.A)
             {
-                if (element.TryGetProperty("list", out var list) && list.ValueKind == JsonValueKind.Array) return list;
-                if (element.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array) return items;
-                if (element.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array) return data;
-                
+                ChapterGrid.SelectAll();
+                e.Handled = true;
+            }
+            else if (Keyboard.Modifiers == ModifierKeys.Control && e.Key == Key.C)
+            {
+                var selected = ChapterGrid.SelectedItems.Cast<ChapterItem>().ToList();
+                if (selected.Count > 0)
+                {
+                    var titles = selected.Select(x => x.Title);
+                    string text = string.Join("\n", titles);
+                    try { Clipboard.SetText(text); LeftStatus.Text = "已复制选中的章节名"; } catch { }
+                }
+                e.Handled = true;
+            }
+        }
+
+        private List<JsonElement> ExtractArray(JsonElement element, int depth = 0)
+        {
+            if (depth > 6) return null;
+            if (element.ValueKind == JsonValueKind.Array)
+            {
+                if (element.GetArrayLength() > 0)
+                {
+                    var first = element[0];
+                    if (first.ValueKind == JsonValueKind.Object)
+                    {
+                        bool hasTitle = false;
+                        bool hasId = false;
+                        foreach (var prop in first.EnumerateObject())
+                        {
+                            if (prop.Name == "title" || prop.Name == "name" || prop.Name == "chapter_title" || prop.Name == "album_title") hasTitle = true;
+                            if (prop.Name == "id" || prop.Name == "album_id" || prop.Name == "index" || prop.Name == "idx" || prop.Name == "chapter_idx") hasId = true;
+                        }
+                        if (hasTitle && hasId) return element.EnumerateArray().ToList();
+                    }
+                }
+                return null;
+            }
+            else if (element.ValueKind == JsonValueKind.Object)
+            {
                 foreach (var prop in element.EnumerateObject())
                 {
-                    var res = FindList(prop.Value);
-                    if (res.HasValue) return res;
+                    var res = ExtractArray(prop.Value, depth + 1);
+                    if (res != null) return res;
                 }
-            }
-            else if (element.ValueKind == JsonValueKind.Array)
-            {
-                return element;
             }
             return null;
         }
@@ -100,39 +133,28 @@ namespace tyfm
                 }
 
                 using var doc = JsonDocument.Parse(rawJson);
-                var listNode = FindList(doc.RootElement);
+                var listNode = ExtractArray(doc.RootElement);
                 
-                if (!listNode.HasValue)
-                {
-                    throw new Exception("JSON中未找到有效的数据列表");
-                }
+                if (listNode == null) throw new Exception("JSON中未找到有效的数据列表");
 
                 var list = new List<ResultItem>();
                 int idx = 1;
-                foreach (var item in listNode.Value.EnumerateArray())
+                foreach (var item in listNode)
                 {
                     string title = "";
                     if (item.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String) title = t.GetString();
-                    
                     string narrator = "";
                     if (item.TryGetProperty("teller", out var n) && n.ValueKind == JsonValueKind.String) narrator = n.GetString();
-
                     string id = "";
                     if (item.TryGetProperty("id", out var i)) id = i.ToString();
                     
-                    if (!string.IsNullOrEmpty(id))
-                    {
-                        list.Add(new ResultItem { Idx = idx++, Title = title, Narrator = narrator, Id = id });
-                    }
+                    if (!string.IsNullOrEmpty(id)) list.Add(new ResultItem { Idx = idx++, Title = title, Narrator = narrator, Id = id });
                 }
                 
                 ResultGrid.ItemsSource = list;
                 LeftStatus.Text = $"找到 {list.Count} 个专辑";
             }
-            catch (Exception ex) 
-            { 
-                LeftStatus.Text = $"搜索异常: {ex.Message}"; 
-            }
+            catch (Exception ex) { LeftStatus.Text = $"搜索异常: {ex.Message}"; }
             finally { SearchBtn.IsEnabled = true; }
         }
 
@@ -161,33 +183,59 @@ namespace tyfm
                 var chapRes = await httpClient.SendAsync(chapReq);
                 string chapterJson = await chapRes.Content.ReadAsStringAsync();
                 
-                using var doc = JsonDocument.Parse(chapterJson);
-                var listNode = FindList(doc.RootElement);
-                if (!listNode.HasValue) throw new Exception("章节列表未找到");
-                
-                var chapterList = new ObservableCollection<ChapterItem>();
-                int idx = 1;
-                foreach (var item in listNode.Value.EnumerateArray())
+                if (string.IsNullOrWhiteSpace(chapterJson) || !chapterJson.TrimStart().StartsWith("{"))
                 {
-                    if (idx >= startIdx && idx <= endIdx)
+                    string preview = chapterJson.Length > 200 ? chapterJson.Substring(0, 200) : chapterJson;
+                    MessageBox.Show("获取章节列表失败，服务器返回了非JSON数据：\n" + preview, "获取章节失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+
+                using var doc = JsonDocument.Parse(chapterJson);
+                var listNode = ExtractArray(doc.RootElement);
+                if (listNode == null) 
+                {
+                    MessageBox.Show("未能从接口解析出章节列表。", "解析失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return;
+                }
+                
+                var chapterList = new List<ChapterItem>();
+                int idx = 1;
+                foreach (var item in listNode)
+                {
+                    int realIdx = idx;
+                    if (item.TryGetProperty("index", out var idxProp) && int.TryParse(idxProp.ToString(), out int parsedIdx)) realIdx = parsedIdx;
+                    else if (item.TryGetProperty("idx", out var idxProp2) && int.TryParse(idxProp2.ToString(), out int parsedIdx2)) realIdx = parsedIdx2;
+                    else if (item.TryGetProperty("chapter_idx", out var idxProp3) && int.TryParse(idxProp3.ToString(), out int parsedIdx3)) realIdx = parsedIdx3;
+
+                    if (realIdx >= startIdx && realIdx <= endIdx)
                     {
                         string cTitle = "";
                         if (item.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String) cTitle = t.GetString();
-                        if (string.IsNullOrEmpty(cTitle)) cTitle = $"第{idx}集";
-                        chapterList.Add(new ChapterItem { Index = idx, Title = cTitle });
+                        if (string.IsNullOrEmpty(cTitle)) cTitle = $"第{realIdx}集";
+                        
+                        chapterList.Add(new ChapterItem { Index = realIdx, Title = cTitle.Trim() });
                     }
                     idx++;
                 }
 
-                total = chapterList.Count;
+                chapterList = chapterList.OrderBy(x => x.Index).ToList();
+                var observableList = new ObservableCollection<ChapterItem>(chapterList);
+
+                if (observableList.Count == 0)
+                {
+                    MessageBox.Show("未找到符合条件的章节，请检查起始/结束序号是否超出范围。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+
+                total = observableList.Count;
                 done = 0;
                 fail = 0;
-                ChapterGrid.ItemsSource = chapterList;
-                await LoadRecordAsync(chapterList);
+                ChapterGrid.ItemsSource = observableList;
+                await LoadRecordAsync(observableList);
                 uiTimer.Start();
 
                 var semaphore = new SemaphoreSlim(concurrency);
-                var tasks = chapterList.Select(async chap =>
+                var tasks = observableList.Select(async chap =>
                 {
                     await semaphore.WaitAsync(cts.Token);
                     try

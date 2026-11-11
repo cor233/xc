@@ -52,6 +52,27 @@ namespace tyfm
             uiTimer.Tick += (s, e) => UpdateStats();
         }
 
+        private JsonElement? FindList(JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                if (element.TryGetProperty("list", out var list) && list.ValueKind == JsonValueKind.Array) return list;
+                if (element.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array) return items;
+                if (element.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array) return data;
+                
+                foreach (var prop in element.EnumerateObject())
+                {
+                    var res = FindList(prop.Value);
+                    if (res.HasValue) return res;
+                }
+            }
+            else if (element.ValueKind == JsonValueKind.Array)
+            {
+                return element;
+            }
+            return null;
+        }
+
         private async Task SearchAsync()
         {
             string keyword = SearchBox.Text.Trim();
@@ -79,18 +100,26 @@ namespace tyfm
                 }
 
                 using var doc = JsonDocument.Parse(rawJson);
-                if (!doc.RootElement.TryGetProperty("data", out var data) || !data.TryGetProperty("list", out var listElement))
+                var listNode = FindList(doc.RootElement);
+                
+                if (!listNode.HasValue)
                 {
-                    throw new Exception("JSON结构发生变化，找不到data.list节点");
+                    throw new Exception("JSON中未找到有效的数据列表");
                 }
 
-                var items = listElement;
                 var list = new List<ResultItem>();
                 int idx = 1;
-                foreach (var item in items.EnumerateArray())
+                foreach (var item in listNode.Value.EnumerateArray())
                 {
-                    list.Add(new ResultItem { Idx = idx++, Title = item.GetProperty("title").GetString() ?? "", Narrator = item.TryGetProperty("teller", out var t) ? t.GetString() : "", Id = item.GetProperty("id").ToString() });
+                    string title = item.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
+                    string narrator = item.TryGetProperty("teller", out var n) ? n.GetString() ?? "" : "";
+                    string id = item.TryGetProperty("id", out var i) ? i.ToString() : "";
+                    if (!string.IsNullOrEmpty(id))
+                    {
+                        list.Add(new ResultItem { Idx = idx++, Title = title, Narrator = narrator, Id = id });
+                    }
                 }
+                
                 ResultGrid.ItemsSource = list;
                 LeftStatus.Text = $"找到 {list.Count} 个专辑";
             }
@@ -127,14 +156,16 @@ namespace tyfm
                 string chapterJson = await chapRes.Content.ReadAsStringAsync();
                 
                 using var doc = JsonDocument.Parse(chapterJson);
-                var list = doc.RootElement.GetProperty("data").GetProperty("list");
+                var listNode = FindList(doc.RootElement);
+                if (!listNode.HasValue) throw new Exception("章节列表未找到");
+                
                 var chapterList = new ObservableCollection<ChapterItem>();
                 int idx = 1;
-                foreach (var item in list.EnumerateArray())
+                foreach (var item in listNode.Value.EnumerateArray())
                 {
                     if (idx >= startIdx && idx <= endIdx)
                     {
-                        string cTitle = item.TryGetProperty("title", out var t) ? t.GetString() : $"第{idx}集";
+                        string cTitle = item.TryGetProperty("title", out var t) ? t.GetString() ?? $"第{idx}集" : $"第{idx}集";
                         chapterList.Add(new ChapterItem { Index = idx, Title = cTitle });
                     }
                     idx++;

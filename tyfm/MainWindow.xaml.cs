@@ -12,7 +12,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
 
-namespace Tyfm
+namespace Syp
 {
     public partial class MainWindow : Window
     {
@@ -23,7 +23,7 @@ namespace Tyfm
             public int Index { get; set; }
             public string Title { get; set; } = "";
             public string Status { get => _status; set { if (_status != value) { _status = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Status))); } } }
-            public string Error { get; set; } = "";
+            public string TrackNo { get; set; } = "";
             public event PropertyChangedEventHandler? PropertyChanged;
         }
         public class RecordInfo { public string Status { get; set; } = ""; public string Err { get; set; } = ""; }
@@ -39,14 +39,15 @@ namespace Tyfm
         public MainWindow()
         {
             InitializeComponent();
-            httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
-            
+            httpClient.DefaultRequestHeaders.Add("User-Agent", "okhttp/4.9.3");
+            httpClient.DefaultRequestHeaders.Add("Accept", "application/json, text/plain, */*");
+
             SearchBtn.Click += async (s, e) => await SearchAsync();
             DownloadBtn.Click += async (s, e) => await DownloadAsync();
             StopBtn.Click += (s, e) => { try { cts?.Cancel(); } catch { } LeftStatus.Text = "正在停止..."; };
             BrowseBtn.Click += (s, e) => { var d = new Microsoft.Win32.OpenFolderDialog(); if (d.ShowDialog() == true) FolderBox.Text = d.FolderName; };
             RetryBtn.Click += (s, e) => { if (ChapterGrid.ItemsSource is ObservableCollection<ChapterItem> list) { var failed = list.Where(x => x.Status == "失败").ToList(); if (failed.Count == 0) MessageBox.Show("没有失败的章节"); else MessageBox.Show($"找到 {failed.Count} 个失败章节。请重新点击下载按钮进行重试。"); } };
-            
+
             uiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
             uiTimer.Tick += (s, e) => UpdateStats();
         }
@@ -61,18 +62,22 @@ namespace Tyfm
 
             try
             {
-                var req = new HttpRequestMessage(HttpMethod.Post, "https://api-preview.toulaopao.cc/api/h5/listening/search");
-                req.Content = new StringContent(JsonSerializer.Serialize(new { keyword, page = 1 }), Encoding.UTF8, "application/json");
-                var res = await httpClient.SendAsync(req);
-                string rawJson = await res.Content.ReadAsStringAsync();
+                var res = await httpClient.GetStringAsync($"https://api.365ting.com/tingyou-app/search?keyword={keyword}");
                 
-                if (string.IsNullOrWhiteSpace(rawJson) || !rawJson.TrimStart().StartsWith("{"))
+                if (string.IsNullOrWhiteSpace(res) || !res.TrimStart().StartsWith("{"))
                 {
-                    throw new Exception($"接口返回异常数据: {rawJson.Substring(0, Math.Min(rawJson.Length, 50))}");
+                    string preview = res.Length > 200 ? res.Substring(0, 200) : res;
+                    MessageBox.Show($"接口返回了非JSON数据，可能被服务器拦截或限流。\n\n返回内容预览：\n{preview}", "接口异常", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    LeftStatus.Text = "搜索失败: 服务器返回异常";
+                    return;
                 }
 
-                using var doc = JsonDocument.Parse(rawJson);
-                var items = doc.RootElement.GetProperty("data").GetProperty("list");
+                using var doc = JsonDocument.Parse(res);
+                if (!doc.RootElement.TryGetProperty("data", out var data) || !data.TryGetProperty("items", out var items))
+                {
+                    throw new Exception("JSON结构发生变化，找不到data.items节点");
+                }
+
                 var list = new List<ResultItem>();
                 int idx = 1;
                 foreach (var item in items.EnumerateArray())
@@ -95,7 +100,7 @@ namespace Tyfm
             int startIdx = int.TryParse(StartBox.Text, out int s1) ? s1 : 1;
             int endIdx = int.TryParse(EndBox.Text, out int e1) ? e1 : int.MaxValue;
 
-            string saveDir = Path.Combine(FolderBox.Text, SanitizeName(selected.Title));
+            string saveDir = Path.Combine(FolderBox.Text, SanitizeName(selected.Title + "-" + selected.Narrator));
             Directory.CreateDirectory(saveDir);
             jsonPath = Path.Combine(saveDir, "record.json");
 
@@ -105,18 +110,46 @@ namespace Tyfm
 
             try
             {
-                LeftStatus.Text = "获取章节列表...";
-                string chapterJson = await httpClient.GetStringAsync($"https://appp.fdhtbz.cn/api/h5/listening/chapters/{selected.Id}?cache_meta=1");
-                using var doc = JsonDocument.Parse(chapterJson);
-                var list = doc.RootElement.GetProperty("data").GetProperty("list");
+                LeftStatus.Text = "正在提取专辑...";
+                var loginReq = new HttpRequestMessage(HttpMethod.Post, "https://api.365ting.com/api/auth/device-login");
+                loginReq.Content = new StringContent(JsonSerializer.Serialize(new { device_id = "tvbox-tingshijie-" + Guid.NewGuid().ToString("N").Substring(0, 12) }), Encoding.UTF8, "application/json");
+                var loginRes = await httpClient.SendAsync(loginReq);
+                var loginDoc = JsonDocument.Parse(await loginRes.Content.ReadAsStringAsync());
+                string uid = loginDoc.RootElement.GetProperty("data").GetProperty("user_id").ToString()!;
+
+                var importReq = new HttpRequestMessage(HttpMethod.Post, "https://api.365ting.com/tingyou-app/import");
+                importReq.Content = new StringContent(JsonSerializer.Serialize(new { user_id = uid, album_id = selected.Id }), Encoding.UTF8, "application/json");
+                var importRes = await httpClient.SendAsync(importReq);
+                var importDoc = JsonDocument.Parse(await importRes.Content.ReadAsStringAsync());
+                string taskId = importDoc.RootElement.GetProperty("data").GetProperty("task_id").ToString()!;
+
+                string platId = "";
+                for (int i = 0; i < 30; i++)
+                {
+                    await Task.Delay(500);
+                    var statRes = await httpClient.GetStringAsync($"https://api.365ting.com/tingyou-app/import/status?task_id={taskId}");
+                    var statDoc = JsonDocument.Parse(statRes);
+                    if (statDoc.RootElement.GetProperty("data").GetProperty("status").GetString() == "done")
+                    {
+                        platId = statDoc.RootElement.GetProperty("data").GetProperty("album_id").ToString()!;
+                        break;
+                    }
+                }
+                if (string.IsNullOrEmpty(platId)) throw new Exception("提取超时");
+
+                var tracksRes = await httpClient.GetStringAsync($"https://api.365ting.com/api/albums/{platId}/tracks?user_id={uid}");
+                var tracksDoc = JsonDocument.Parse(tracksRes);
+                var tracks = tracksDoc.RootElement.GetProperty("data");
+
                 var chapterList = new ObservableCollection<ChapterItem>();
                 int idx = 1;
-                foreach (var item in list.EnumerateArray())
+                foreach (var item in tracks.EnumerateArray())
                 {
                     if (idx >= startIdx && idx <= endIdx)
                     {
                         string cTitle = item.TryGetProperty("title", out var t) ? t.GetString() : $"第{idx}集";
-                        chapterList.Add(new ChapterItem { Index = idx, Title = cTitle });
+                        string trackNo = item.TryGetProperty("track_no", out var tn) ? tn.ToString() : idx.ToString();
+                        chapterList.Add(new ChapterItem { Index = idx, Title = cTitle, TrackNo = trackNo });
                     }
                     idx++;
                 }
@@ -144,11 +177,7 @@ namespace Tyfm
                             return;
                         }
 
-                        var playReq = new HttpRequestMessage(HttpMethod.Post, "https://appp.fdhtbz.cn/api/h5/listening/play");
-                        playReq.Content = new StringContent(JsonSerializer.Serialize(new { album_id = selected.Id, chapter_idx = chap.Index }), Encoding.UTF8, "application/json");
-                        var playRes = await httpClient.SendAsync(playReq, cts.Token);
-                        var playDoc = JsonDocument.Parse(await playRes.Content.ReadAsStringAsync());
-                        string audioUrl = playDoc.RootElement.GetProperty("play_url").GetString()!;
+                        string audioUrl = $"https://api.365ting.com/tingyou/stream?album={platId}&idx={chap.TrackNo}";
                         byte[] audioData = await httpClient.GetByteArrayAsync(audioUrl, cts.Token);
                         await File.WriteAllBytesAsync(fileName, audioData, cts.Token);
 
@@ -161,7 +190,6 @@ namespace Tyfm
                     catch (Exception ex)
                     {
                         chap.Status = "失败";
-                        chap.Error = ex.Message;
                         Interlocked.Increment(ref fail);
                         UpdateRecord(chap.Index, "失败", ex.Message);
                     }

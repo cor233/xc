@@ -420,7 +420,6 @@ class DownloadApp:
         self._searching = False
         self.session_id = 0
         self.load_token = 0
-        self._unsaved_record_count = 0
         self._latest_status = '就绪'
 
         self._err_lock = threading.Lock()
@@ -713,7 +712,6 @@ class DownloadApp:
                 return
         with self.record_lock:
             self.record_cache.clear()
-            self._unsaved_record_count = 0
         self.json_path = None
 
         selection = self.result_tree.selection()
@@ -856,16 +854,13 @@ class DownloadApp:
                 with self.record_lock:
                     self.record_cache.clear()
                     self.record_cache.update(normalized)
-                    self._unsaved_record_count = 0
             except Exception as e:
                 self.error('读取记录失败: %s' % e)
                 with self.record_lock:
                     self.record_cache.clear()
-                    self._unsaved_record_count = 0
         else:
             with self.record_lock:
                 self.record_cache.clear()
-                self._unsaved_record_count = 0
         self.update_completed_failed(completed, failed)
         self._apply_record_to_chapter_tree()
 
@@ -1045,13 +1040,8 @@ class DownloadApp:
                 return False, '取消'
             with self.record_lock:
                 self.record_cache[key] = {'status': '完成', 'err': ''}
-                self._unsaved_record_count += 1
-                need_flush = self._unsaved_record_count >= 5
-                if need_flush:
-                    self._unsaved_record_count = 0
             self.update_chapter_status(chap_num, '完成')
-            if need_flush:
-                self.flush_record(json_path)
+            self.flush_record(json_path)
             self._update_stats_from_cache()
             return True, '完成'
 
@@ -1071,13 +1061,8 @@ class DownloadApp:
             self.status('失败: %s (%s)' % (chap_title, url_err))
             with self.record_lock:
                 self.record_cache[key] = {'status': '失败', 'err': url_err}
-                self._unsaved_record_count += 1
-                need_flush = self._unsaved_record_count >= 5
-                if need_flush:
-                    self._unsaved_record_count = 0
             self.update_chapter_status(chap_num, '失败')
-            if need_flush:
-                self.flush_record(json_path)
+            self.flush_record(json_path)
             self._update_stats_from_cache()
             return False, url_err
 
@@ -1087,26 +1072,20 @@ class DownloadApp:
         if sid != self.session_id:
             return False, '取消'
 
+        if not success:
+            if self.stop_event.is_set() or err == '已取消':
+                return False, '取消'
+            status_entry = {'status': '失败', 'err': err or '下载失败'}
+            self.status('失败: %s (%s)' % (chap_title, err or '下载失败'))
+            self.update_chapter_status(chap_num, '失败')
+        else:
+            status_entry = {'status': '完成', 'err': ''}
+            self.status('完成: %s' % filename)
+            self.update_chapter_status(chap_num, '完成')
+
         with self.record_lock:
-            if not success:
-                if self.stop_event.is_set() or err == '已取消':
-                    return False, '取消'
-                status_entry = {'status': '失败', 'err': err or '下载失败'}
-                self.status('失败: %s (%s)' % (chap_title, err or '下载失败'))
-                self.update_chapter_status(chap_num, '失败')
-            else:
-                status_entry = {'status': '完成', 'err': ''}
-                self.status('完成: %s' % filename)
-                self.update_chapter_status(chap_num, '完成')
-
             self.record_cache[key] = status_entry
-            self._unsaved_record_count += 1
-            need_flush = self._unsaved_record_count >= 5
-            if need_flush:
-                self._unsaved_record_count = 0
-
-        if need_flush:
-            self.flush_record(json_path)
+        self.flush_record(json_path)
         self._update_stats_from_cache()
         return success, status_entry.get('err') or status_entry['status']
 
@@ -1146,7 +1125,6 @@ class DownloadApp:
                 normalized = self._normalize_record(old_record)
                 with self.record_lock:
                     self.record_cache.update(normalized)
-                    self._unsaved_record_count = 0
             except Exception as e:
                 self.error('读取记录失败: %s' % e)
         return save_dir, current_chapters, json_path, album_id

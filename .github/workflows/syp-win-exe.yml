@@ -2,9 +2,6 @@ name: Build SYP EXE（Windows Green）
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'syp/**'
 
 jobs:
   build:

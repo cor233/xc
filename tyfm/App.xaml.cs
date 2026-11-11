@@ -1,6 +1,6 @@
 using System.Windows;
 
-namespace Tyfm
+namespace tyfm
 {
     public partial class App : Application
     {

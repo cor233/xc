@@ -38,28 +38,17 @@ namespace Tyfm
 
         public MainWindow()
         {
-            App.Log("MainWindow Constructor Start");
-            try
-            {
-                App.Log("Calling InitializeComponent()");
-                InitializeComponent();
-                App.Log("InitializeComponent() Done");
-
-                httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
-                SearchBtn.Click += async (s, e) => await SearchAsync();
-                DownloadBtn.Click += async (s, e) => await DownloadAsync();
-                StopBtn.Click += (s, e) => { try { cts?.Cancel(); } catch { } LeftStatus.Text = "正在停止..."; };
-                BrowseBtn.Click += (s, e) => { var d = new Microsoft.Win32.OpenFolderDialog(); if (d.ShowDialog() == true) FolderBox.Text = d.FolderName; };
-                RetryBtn.Click += (s, e) => { if (ChapterGrid.ItemsSource is ObservableCollection<ChapterItem> list) { var failed = list.Where(x => x.Status == "失败").ToList(); if (failed.Count == 0) MessageBox.Show("没有失败的章节"); else MessageBox.Show($"找到 {failed.Count} 个失败章节。请重新点击下载按钮进行重试。"); } };
-                uiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
-                uiTimer.Tick += (s, e) => UpdateStats();
-                App.Log("MainWindow Event Bindings Done");
-            }
-            catch (Exception ex)
-            {
-                App.Log($"MainWindow Constructor Exception: {ex}");
-                throw;
-            }
+            InitializeComponent();
+            httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+            
+            SearchBtn.Click += async (s, e) => await SearchAsync();
+            DownloadBtn.Click += async (s, e) => await DownloadAsync();
+            StopBtn.Click += (s, e) => { try { cts?.Cancel(); } catch { } LeftStatus.Text = "正在停止..."; };
+            BrowseBtn.Click += (s, e) => { var d = new Microsoft.Win32.OpenFolderDialog(); if (d.ShowDialog() == true) FolderBox.Text = d.FolderName; };
+            RetryBtn.Click += (s, e) => { if (ChapterGrid.ItemsSource is ObservableCollection<ChapterItem> list) { var failed = list.Where(x => x.Status == "失败").ToList(); if (failed.Count == 0) MessageBox.Show("没有失败的章节"); else MessageBox.Show($"找到 {failed.Count} 个失败章节。请重新点击下载按钮进行重试。"); } };
+            
+            uiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+            uiTimer.Tick += (s, e) => UpdateStats();
         }
 
         private async Task SearchAsync()
@@ -75,7 +64,14 @@ namespace Tyfm
                 var req = new HttpRequestMessage(HttpMethod.Post, "https://api-preview.toulaopao.cc/api/h5/listening/search");
                 req.Content = new StringContent(JsonSerializer.Serialize(new { keyword, page = 1 }), Encoding.UTF8, "application/json");
                 var res = await httpClient.SendAsync(req);
-                using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync());
+                string rawJson = await res.Content.ReadAsStringAsync();
+                
+                if (string.IsNullOrWhiteSpace(rawJson) || !rawJson.TrimStart().StartsWith("{"))
+                {
+                    throw new Exception($"接口返回异常数据: {rawJson.Substring(0, Math.Min(rawJson.Length, 50))}");
+                }
+
+                using var doc = JsonDocument.Parse(rawJson);
                 var items = doc.RootElement.GetProperty("data").GetProperty("list");
                 var list = new List<ResultItem>();
                 int idx = 1;

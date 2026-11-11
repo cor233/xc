@@ -333,9 +333,9 @@ class SourceClient:
     def get_audio_url(self, chap):
         return '%s/tingyou/stream?album=%s&idx=%s' % (API, chap['album_id'], chap['track_no'])
 
-def _probe_file(url, headers, timeout):
+def _probe_file(session, url, headers, timeout):
     try:
-        r = requests.get(url, headers=headers, stream=True, timeout=timeout)
+        r = session.get(url, headers=headers, stream=True, timeout=timeout)
         try:
             ct = (r.headers.get('Content-Type') or '').lower()
             if r.status_code in (429, 503) or 'json' in ct:
@@ -357,11 +357,11 @@ def _probe_file(url, headers, timeout):
     except Exception:
         return None, False, ''
 
-def _download_range(url, headers, start, end, save_path, stop_event, timeout):
+def _download_range(session, url, headers, start, end, save_path, stop_event, timeout):
     h = dict(headers)
     h['Range'] = 'bytes=%d-%d' % (start, end)
     try:
-        r = requests.get(url, headers=h, stream=True, timeout=timeout)
+        r = session.get(url, headers=h, stream=True, timeout=timeout)
         ct = (r.headers.get('Content-Type') or '').lower()
         if r.status_code in (429, 503) or 'json' in ct:
             return -2
@@ -388,7 +388,7 @@ def _interruptible_sleep(stop_event, secs):
     time.sleep(secs)
     return False
 
-def download_audio(url, save_path, retry=3, status_cb=None, stop_event=None,
+def download_audio(session, url, save_path, retry=3, status_cb=None, stop_event=None,
                    connect_timeout=10, read_timeout=60, segments=2):
     temp_path = save_path + '.tmp'
     headers = {
@@ -401,7 +401,7 @@ def download_audio(url, save_path, retry=3, status_cb=None, stop_event=None,
     last_err = ['']
 
     def _single_download():
-        r = requests.get(url, headers=headers, stream=True,
+        r = session.get(url, headers=headers, stream=True,
                          timeout=(connect_timeout, read_timeout))
         ct = (r.headers.get('Content-Type') or '').lower()
         if r.status_code in (429, 503) or 'json' in ct:
@@ -428,7 +428,7 @@ def download_audio(url, save_path, retry=3, status_cb=None, stop_event=None,
         part_files = []
         try:
             total, accept_range, ct = _probe_file(
-                url, headers, (connect_timeout, read_timeout))
+                session, url, headers, (connect_timeout, read_timeout))
 
             if ct == 'rate_limited':
                 wait_secs = 30 * (attempt + 1)
@@ -460,7 +460,7 @@ def download_audio(url, save_path, retry=3, status_cb=None, stop_event=None,
                 with ThreadPoolExecutor(max_workers=len(plans)) as ex:
                     futures = {}
                     for s, e, p in plans:
-                        f = ex.submit(_download_range, url, headers,
+                        f = ex.submit(_download_range, session, url, headers,
                                       s, e, p, stop_event,
                                       (connect_timeout, read_timeout))
                         futures[f] = (s, e, p)
@@ -563,6 +563,8 @@ class DownloadApp:
         self._searching = False
         self.session_id = 0
         self.load_token = 0
+        self._unsaved_record_count = 0
+        self._latest_status = '就绪'
 
         self._err_lock = threading.Lock()
         self._err_fp = None
@@ -571,6 +573,7 @@ class DownloadApp:
         self.create_widgets()
         self.client = SourceClient(status_cb=self.status, error_cb=self.error)
         self.root.protocol('WM_DELETE_WINDOW', self.on_closing)
+        self._update_status_ui()
 
     def _init_log_file(self):
         try:
@@ -721,21 +724,21 @@ class DownloadApp:
         self.workers_spinbox.delete(0, tk.END)
         self.workers_spinbox.insert(0, str(val))
 
+    def _update_status_ui(self):
+        if self.destroyed:
+            return
+        try:
+            if self.status_var.get() != self._latest_status:
+                self.status_var.set(self._latest_status)
+        except tk.TclError:
+            return
+        try:
+            self.root.after(200, self._update_status_ui)
+        except tk.TclError:
+            pass
+
     def status(self, message):
-        def _ui():
-            if self.destroyed:
-                return
-            try:
-                self.status_var.set(message)
-            except tk.TclError:
-                pass
-        if threading.current_thread() is threading.main_thread():
-            _ui()
-        else:
-            try:
-                self.root.after(0, _ui)
-            except tk.TclError:
-                pass
+        self._latest_status = message
 
     def error(self, message):
         line = '%s [ERROR] %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), message)
@@ -853,6 +856,7 @@ class DownloadApp:
                 return
         with self.record_lock:
             self.record_cache.clear()
+            self._unsaved_record_count = 0
         self.json_path = None
 
         selection = self.result_tree.selection()
@@ -995,13 +999,16 @@ class DownloadApp:
                 with self.record_lock:
                     self.record_cache.clear()
                     self.record_cache.update(normalized)
+                    self._unsaved_record_count = 0
             except Exception as e:
                 self.error('读取记录失败: %s' % e)
                 with self.record_lock:
                     self.record_cache.clear()
+                    self._unsaved_record_count = 0
         else:
             with self.record_lock:
                 self.record_cache.clear()
+                self._unsaved_record_count = 0
         self.update_completed_failed(completed, failed)
         self._apply_record_to_chapter_tree()
 
@@ -1181,8 +1188,13 @@ class DownloadApp:
                 return False, '取消'
             with self.record_lock:
                 self.record_cache[key] = {'status': '完成', 'err': ''}
+                self._unsaved_record_count += 1
+                need_flush = self._unsaved_record_count >= 5
+                if need_flush:
+                    self._unsaved_record_count = 0
             self.update_chapter_status(chap_num, '完成')
-            self.flush_record(json_path)
+            if need_flush:
+                self.flush_record(json_path)
             self._update_stats_from_cache()
             return True, '完成'
 
@@ -1202,31 +1214,42 @@ class DownloadApp:
             self.status('失败: %s (%s)' % (chap_title, url_err))
             with self.record_lock:
                 self.record_cache[key] = {'status': '失败', 'err': url_err}
+                self._unsaved_record_count += 1
+                need_flush = self._unsaved_record_count >= 5
+                if need_flush:
+                    self._unsaved_record_count = 0
             self.update_chapter_status(chap_num, '失败')
-            self.flush_record(json_path)
+            if need_flush:
+                self.flush_record(json_path)
             self._update_stats_from_cache()
             return False, url_err
 
         self.status('下载: %s' % chap_title)
-        success, err = download_audio(audio_url, filepath,
+        success, err = download_audio(self.client._app, audio_url, filepath,
                                       status_cb=self.status, stop_event=self.stop_event)
         if sid != self.session_id:
             return False, '取消'
 
-        if not success:
-            if self.stop_event.is_set() or err == '已取消':
-                return False, '取消'
-            status_entry = {'status': '失败', 'err': err or '下载失败'}
-            self.status('失败: %s (%s)' % (chap_title, err or '下载失败'))
-            self.update_chapter_status(chap_num, '失败')
-        else:
-            status_entry = {'status': '完成', 'err': ''}
-            self.status('完成: %s' % filename)
-            self.update_chapter_status(chap_num, '完成')
-
         with self.record_lock:
+            if not success:
+                if self.stop_event.is_set() or err == '已取消':
+                    return False, '取消'
+                status_entry = {'status': '失败', 'err': err or '下载失败'}
+                self.status('失败: %s (%s)' % (chap_title, err or '下载失败'))
+                self.update_chapter_status(chap_num, '失败')
+            else:
+                status_entry = {'status': '完成', 'err': ''}
+                self.status('完成: %s' % filename)
+                self.update_chapter_status(chap_num, '完成')
+
             self.record_cache[key] = status_entry
-        self.flush_record(json_path)
+            self._unsaved_record_count += 1
+            need_flush = self._unsaved_record_count >= 5
+            if need_flush:
+                self._unsaved_record_count = 0
+
+        if need_flush:
+            self.flush_record(json_path)
         self._update_stats_from_cache()
         return success, status_entry.get('err') or status_entry['status']
 
@@ -1265,6 +1288,7 @@ class DownloadApp:
                 normalized = self._normalize_record(old_record)
                 with self.record_lock:
                     self.record_cache.update(normalized)
+                    self._unsaved_record_count = 0
             except Exception as e:
                 self.error('读取记录失败: %s' % e)
         return save_dir, current_chapters, json_path
@@ -1380,6 +1404,7 @@ class DownloadApp:
             self.downloading = False
         self.paused_event.clear()
         self.stop_event.clear()
+        self.flush_record()
 
         def _restore_ui():
             try:

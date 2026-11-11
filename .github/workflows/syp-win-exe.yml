@@ -10,17 +10,22 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup .NET
+    - name: 检出代码
+      uses: actions/checkout@v4
+      
+    - name: 设置 .NET 环境
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '8.0.x'
-    - name: Publish
+        
+    - name: 编译发布项目
       run: dotnet publish syp/syp.csproj -c Release -r win-x64 --self-contained true -o ./publish-syp
-    - name: Zip Output
+      
+    - name: 打包为 ZIP 压缩文件
       run: Compress-Archive -Path ./publish-syp/* -DestinationPath ./syp.zip
-    - name: Upload Artifact
+      
+    - name: 上传构建产物
       uses: actions/upload-artifact@v4
       with:
-        name: syp-green
+        name: syp
         path: ./syp.zip

@@ -24,16 +24,16 @@ namespace tyfm
             public string Title { get; set; } = "";
             public string Status { get => _status; set { if (_status != value) { _status = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Status))); } } }
             public string Error { get; set; } = "";
-            public event PropertyChangedEventHandler? PropertyChanged;
+            public event PropertyChangedEventHandler PropertyChanged;
         }
         public class RecordInfo { public string Status { get; set; } = ""; public string Err { get; set; } = ""; }
 
         private static readonly HttpClient httpClient = new HttpClient(new HttpClientHandler { MaxConnectionsPerServer = 50 }) { Timeout = TimeSpan.FromSeconds(30) };
-        private CancellationTokenSource? cts;
+        private CancellationTokenSource cts;
         private readonly object jsonLock = new object();
         private string jsonPath = "";
         private int total, done, fail;
-        private Dictionary<string, RecordInfo> recordCache = new();
+        private Dictionary<string, RecordInfo> recordCache = new Dictionary<string, RecordInfo>();
         private DispatcherTimer uiTimer;
 
         public MainWindow()
@@ -44,7 +44,7 @@ namespace tyfm
 
             SearchBtn.Click += async (s, e) => await SearchAsync();
             DownloadBtn.Click += async (s, e) => await DownloadAsync();
-            StopBtn.Click += (s, e) => { try { cts?.Cancel(); } catch { } LeftStatus.Text = "正在停止..."; };
+            StopBtn.Click += (s, e) => { try { if (cts != null) cts.Cancel(); } catch { } LeftStatus.Text = "正在停止..."; };
             BrowseBtn.Click += (s, e) => { var d = new Microsoft.Win32.OpenFolderDialog(); if (d.ShowDialog() == true) FolderBox.Text = d.FolderName; };
             RetryBtn.Click += (s, e) => { if (ChapterGrid.ItemsSource is ObservableCollection<ChapterItem> list) { var failed = list.Where(x => x.Status == "失败").ToList(); if (failed.Count == 0) MessageBox.Show("没有失败的章节"); else MessageBox.Show($"找到 {failed.Count} 个失败章节。请重新点击下载按钮进行重试。"); } };
 
@@ -94,7 +94,7 @@ namespace tyfm
                 if (string.IsNullOrWhiteSpace(rawJson) || !rawJson.TrimStart().StartsWith("{"))
                 {
                     string preview = rawJson.Length > 200 ? rawJson.Substring(0, 200) : rawJson;
-                    MessageBox.Show($"接口返回了非JSON数据，可能被服务器拦截或限流。\n\n返回内容预览：\n{preview}", "接口异常", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    MessageBox.Show("接口返回了非JSON数据，可能被服务器拦截或限流。\n\n返回内容预览：\n" + preview, "接口异常", MessageBoxButton.OK, MessageBoxImage.Warning);
                     LeftStatus.Text = "搜索失败: 服务器返回异常";
                     return;
                 }
@@ -111,9 +111,15 @@ namespace tyfm
                 int idx = 1;
                 foreach (var item in listNode.Value.EnumerateArray())
                 {
-                    string title = item.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "";
-                    string narrator = item.TryGetProperty("teller", out var n) ? n.GetString() ?? "" : "";
-                    string id = item.TryGetProperty("id", out var i) ? i.ToString() : "";
+                    string title = "";
+                    if (item.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String) title = t.GetString();
+                    
+                    string narrator = "";
+                    if (item.TryGetProperty("teller", out var n) && n.ValueKind == JsonValueKind.String) narrator = n.GetString();
+
+                    string id = "";
+                    if (item.TryGetProperty("id", out var i)) id = i.ToString();
+                    
                     if (!string.IsNullOrEmpty(id))
                     {
                         list.Add(new ResultItem { Idx = idx++, Title = title, Narrator = narrator, Id = id });
@@ -165,7 +171,9 @@ namespace tyfm
                 {
                     if (idx >= startIdx && idx <= endIdx)
                     {
-                        string cTitle = item.TryGetProperty("title", out var t) ? t.GetString() ?? $"第{idx}集" : $"第{idx}集";
+                        string cTitle = "";
+                        if (item.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String) cTitle = t.GetString();
+                        if (string.IsNullOrEmpty(cTitle)) cTitle = $"第{idx}集";
                         chapterList.Add(new ChapterItem { Index = idx, Title = cTitle });
                     }
                     idx++;
@@ -199,7 +207,11 @@ namespace tyfm
                         playReq.Content = new StringContent(JsonSerializer.Serialize(new { album_id = selected.Id, chapter_idx = chap.Index }), Encoding.UTF8, "application/json");
                         var playRes = await httpClient.SendAsync(playReq, cts.Token);
                         var playDoc = JsonDocument.Parse(await playRes.Content.ReadAsStringAsync());
-                        string audioUrl = playDoc.RootElement.GetProperty("play_url").GetString()!;
+                        
+                        string audioUrl = "";
+                        if (playDoc.RootElement.TryGetProperty("play_url", out var u) && u.ValueKind == JsonValueKind.String) audioUrl = u.GetString();
+                        
+                        if (string.IsNullOrEmpty(audioUrl)) throw new Exception("无法获取音频地址");
                         
                         byte[] audioData = await httpClient.GetByteArrayAsync(audioUrl, cts.Token);
                         await File.WriteAllBytesAsync(fileName, audioData, cts.Token);

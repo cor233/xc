@@ -2,9 +2,6 @@ name: Build TYFM EXE（Windows Green）
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'tyfm/**'
 
 jobs:
   build:

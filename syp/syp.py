@@ -559,7 +559,7 @@ class DownloadApp:
         self.record_cache = {}
         self.json_path = None
         self.chapter_items = {}
-        self.max_workers = 1
+        self.max_workers = 3
         self._searching = False
         self.session_id = 0
         self.load_token = 0

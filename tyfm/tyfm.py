@@ -526,8 +526,6 @@ class DownloadApp:
         self.end_entry.bind('<KeyRelease>', lambda e: self.update_interval_total())
         self.download_btn = ttk.Button(ctrl, text='下载', command=self.start_download_range)
         self.download_btn.pack(side=tk.LEFT, padx=10)
-        self.retry_btn = ttk.Button(ctrl, text='重试失败', command=self.retry_failed)
-        self.retry_btn.pack(side=tk.LEFT, padx=5)
         self.stop_btn = ttk.Button(ctrl, text='停止', command=self.stop_download)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
 
@@ -794,10 +792,20 @@ class DownloadApp:
 
     def stop_download_internal(self):
         with self.downloading_lock:
-            self.stopping = True
+            if not self.downloading:
+                pending = self._pending_book
+                self.stopping = False
+                need_switch = pending is not None
+            else:
+                self.stopping = True
+                need_switch = False
+        if need_switch:
+            self.root.after(0, lambda b=pending: self._switch_book(b))
+            return
+        if not self.stopping:
+            return
         self.status('正在等待当前任务下载完成并停止...')
         self.download_btn.config(state='disabled')
-        self.retry_btn.config(state='disabled')
         self.stop_btn.config(state='disabled')
 
     def stop_download(self):
@@ -971,27 +979,6 @@ class DownloadApp:
             return
         self._start_download(start, end)
 
-    def retry_failed(self):
-        with self.downloading_lock:
-            if self.downloading:
-                messagebox.showinfo('提示', '已有下载任务进行中')
-                return
-            if self._pending_book:
-                messagebox.showinfo('提示', '正在切换书籍，请等待当前任务下载完成')
-                return
-        with self.chapters_lock:
-            if not self.current_chapters:
-                messagebox.showinfo('提示', '请先选择专辑')
-                return
-        with self.record_lock:
-            failed_nums = sorted([int(k) for k, v in self.record_cache.items()
-                                  if self._record_status(v) == '失败' and k.isdigit()])
-        if not failed_nums:
-            messagebox.showinfo('提示', '没有失败的章节')
-            return
-        self.status('重试失败章节: %d 个' % len(failed_nums))
-        self._start_download_custom(failed_nums)
-
     def _start_download(self, start, end):
         self.status('下载范围: 第 %d 章 至 第 %d 章 (并发 %d)' % (start, end, self.max_workers))
         with self.downloading_lock:
@@ -1000,23 +987,9 @@ class DownloadApp:
             self.session_id += 1
             sid = self.session_id
         self.download_btn.config(state='disabled')
-        self.retry_btn.config(state='disabled')
         self.stop_btn.config(state='normal')
         self.download_thread = threading.Thread(target=self.download_range_worker,
                                                 args=(start, end, sid), daemon=True)
-        self.download_thread.start()
-
-    def _start_download_custom(self, indices):
-        with self.downloading_lock:
-            self.stopping = False
-            self.downloading = True
-            self.session_id += 1
-            sid = self.session_id
-        self.download_btn.config(state='disabled')
-        self.retry_btn.config(state='disabled')
-        self.stop_btn.config(state='normal')
-        self.download_thread = threading.Thread(target=self.download_custom_worker,
-                                                args=(indices, sid), daemon=True)
         self.download_thread.start()
 
     def download_one_chapter(self, chap_num, chap, save_dir, json_path, album_id, sid):
@@ -1214,23 +1187,6 @@ class DownloadApp:
         finally:
             self.download_finished(sid)
 
-    def download_custom_worker(self, indices, sid):
-        try:
-            if sid != self.session_id:
-                return
-            save_dir, current_chapters, json_path, album_id = self._prepare_context()
-            pending = []
-            for i in indices:
-                if 1 <= i <= len(current_chapters):
-                    pending.append((i, current_chapters[i - 1]))
-            self._run_pending(pending, save_dir, json_path, album_id, sid)
-            if sid == self.session_id:
-                self.flush_record(json_path)
-        except Exception as e:
-            self.error('下载工作线程异常: %s' % e)
-        finally:
-            self.download_finished(sid)
-
     def download_finished(self, sid=None):
         if sid is not None and sid != self.session_id:
             return
@@ -1245,7 +1201,6 @@ class DownloadApp:
         def _restore_ui():
             try:
                 self.download_btn.config(state='normal')
-                self.retry_btn.config(state='normal')
                 self.stop_btn.config(state='normal')
             except tk.TclError:
                 pass
@@ -1308,7 +1263,6 @@ class DownloadApp:
             self._pending_book = None
             self.status('正在等待当前任务下载完成并退出...')
             self.download_btn.config(state='disabled')
-            self.retry_btn.config(state='disabled')
             self.stop_btn.config(state='disabled')
         else:
             try:

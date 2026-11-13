@@ -613,10 +613,24 @@ class DownloadApp:
         self.workers_spinbox.insert(0, str(self.max_workers))
         self.workers_spinbox.bind('<FocusOut>', lambda e: self.update_max_workers())
         self.workers_spinbox.pack(side=tk.LEFT, padx=5)
-        top.pack(fill=tk.X, pady=10, padx=10)
+        top.pack(fill=tk.X, pady=(10, 5), padx=10)
+
+        status_row = ttk.Frame(self.root)
+        status_row.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0, 10))
+
+        self.status_var = tk.StringVar(value='就绪')
+        tk.Label(status_row, textvariable=self.status_var, anchor=tk.W,
+                 relief=tk.SUNKEN, bd=1, padx=6, pady=3).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.failed_label = ttk.Label(status_row, text='失败: 0', font=('', 10))
+        self.failed_label.pack(side=tk.RIGHT, padx=(15, 5))
+        self.completed_label = ttk.Label(status_row, text='完成: 0', font=('', 10))
+        self.completed_label.pack(side=tk.RIGHT, padx=15)
+        self.total_label = ttk.Label(status_row, text='总数: 0', font=('', 10))
+        self.total_label.pack(side=tk.RIGHT, padx=15)
 
         pane = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 5))
 
         left = ttk.LabelFrame(pane, text='搜索结果')
         result_frame = ttk.Frame(left)
@@ -687,21 +701,6 @@ class DownloadApp:
         chap_frame.rowconfigure(0, weight=1)
         chap_frame.columnconfigure(0, weight=1)
         pane.add(right, weight=1)
-
-        stats = ttk.Frame(self.root)
-        stats.pack(fill=tk.X, pady=(0, 5), padx=10)
-        self.total_label = ttk.Label(stats, text='总数: 0', font=('', 10))
-        self.total_label.pack(side=tk.LEFT, padx=10, expand=True)
-        self.completed_label = ttk.Label(stats, text='完成: 0', font=('', 10))
-        self.completed_label.pack(side=tk.LEFT, padx=10, expand=True)
-        self.failed_label = ttk.Label(stats, text='失败: 0', font=('', 10))
-        self.failed_label.pack(side=tk.LEFT, padx=10, expand=True)
-
-        self.status_var = tk.StringVar(value='就绪')
-        status_bar = ttk.Frame(self.root)
-        status_bar.pack(fill=tk.X, padx=10, pady=(0, 10))
-        tk.Label(status_bar, textvariable=self.status_var, anchor=tk.W,
-                 relief=tk.SUNKEN, bd=1, padx=6, pady=3).pack(fill=tk.X)
 
     def _select_all_chapters(self, event=None):
         self.chapter_tree.selection_set(self.chapter_tree.get_children())

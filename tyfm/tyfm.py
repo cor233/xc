@@ -197,38 +197,7 @@ class SourceClient:
             raise RuntimeError('play_url 未返回: %s' % j)
         return url
 
-def _probe_file(session, url, headers, timeout):
-    try:
-        r = session.get(url, headers=headers, stream=True, timeout=timeout)
-        try:
-            ct = (r.headers.get('Content-Type') or '').lower()
-            if r.status_code in (429, 503) or 'json' in ct:
-                return None, False, 'rate_limited'
-            if r.status_code not in (200, 206):
-                return None, False, ct
-            accept = 'bytes' in (r.headers.get('Accept-Ranges') or '').lower()
-            total = None
-            cl = r.headers.get('Content-Length')
-            cr = r.headers.get('Content-Range') or ''
-            m = re.search(r'/(\d+)\s*$', cr)
-            if m:
-                total = int(m.group(1))
-            elif cl and cl.isdigit() and r.status_code == 200:
-                total = int(cl)
-            return total, accept, ct
-        finally:
-            r.close()
-    except Exception:
-        return None, False, ''
-
-def _interruptible_sleep(stop_event, secs):
-    if stop_event:
-        return stop_event.wait(secs)
-    time.sleep(secs)
-    return False
-
-def download_audio(session, url, save_path, retry=3, status_cb=None, stop_event=None,
-                   connect_timeout=10, read_timeout=60):
+def download_audio(session, url, save_path, retry=3, status_cb=None):
     temp_path = save_path + '.tmp'
     headers = {
         'User-Agent': BROWSER_UA,
@@ -239,27 +208,20 @@ def download_audio(session, url, save_path, retry=3, status_cb=None, stop_event=
     last_err = ['']
 
     for attempt in range(retry):
-        if stop_event and stop_event.is_set():
-            return False, '已取消'
         try:
-            total, accept_range, ct = _probe_file(session, url, headers, (connect_timeout, read_timeout))
-
-            if ct == 'rate_limited':
-                wait_secs = 30 * (attempt + 1)
-                if status_cb:
-                    status_cb('服务端限流, 等待 %d 秒...' % wait_secs)
-                if _interruptible_sleep(stop_event, wait_secs):
-                    return False, '已取消'
-                continue
-
-            if 'html' in ct or 'json' in ct or 'text/' in ct:
-                raise Exception('返回非音频: %s' % ct)
-
-            r = session.get(url, headers=headers, stream=True, timeout=(connect_timeout, read_timeout))
+            r = session.get(url, headers=headers, stream=True, timeout=(10, 60))
             ct = (r.headers.get('Content-Type') or '').lower()
             if r.status_code in (429, 503) or 'json' in ct:
                 r.close()
-                raise Exception('下载被限流')
+                wait_secs = 30 * (attempt + 1)
+                if status_cb:
+                    status_cb('服务端限流, 等待 %d 秒...' % wait_secs)
+                time.sleep(wait_secs)
+                continue
+
+            if 'html' in ct or 'text/' in ct:
+                raise Exception('返回非音频: %s' % ct)
+            
             r.raise_for_status()
 
             written = 0
@@ -267,9 +229,6 @@ def download_audio(session, url, save_path, retry=3, status_cb=None, stop_event=
                 for chunk in r.iter_content(chunk_size=65536):
                     if not chunk:
                         continue
-                    if stop_event and stop_event.is_set():
-                        r.close()
-                        raise InterruptedError()
                     f.write(chunk)
                     written += len(chunk)
 
@@ -278,14 +237,11 @@ def download_audio(session, url, save_path, retry=3, status_cb=None, stop_event=
             os.replace(temp_path, save_path)
             return True, ''
 
-        except InterruptedError:
-            return False, '已取消'
         except Exception as e:
             last_err[0] = str(e) or '下载失败'
             if attempt == retry - 1:
                 return False, last_err[0]
-            if _interruptible_sleep(stop_event, 10):
-                return False, '已取消'
+            time.sleep(10)
         finally:
             if os.path.exists(temp_path):
                 try:
@@ -309,7 +265,6 @@ class DownloadApp:
         self.current_book_narrator = ''
         self.download_folder = tk.StringVar(value=os.path.join(APP_DIR, 'tyfm'))
 
-        self.stop_event = threading.Event()
         self.downloading = False
         self.stopping = False
         self.downloading_lock = threading.Lock()
@@ -411,7 +366,8 @@ class DownloadApp:
         self.download_btn.pack(side=tk.LEFT, padx=10)
         self.retry_btn = ttk.Button(ctrl, text='重试失败', command=self.retry_failed)
         self.retry_btn.pack(side=tk.LEFT, padx=5)
-        ttk.Button(ctrl, text='停止', command=self.stop_download).pack(side=tk.LEFT, padx=5)
+        self.stop_btn = ttk.Button(ctrl, text='停止', command=self.stop_download)
+        self.stop_btn.pack(side=tk.LEFT, padx=5)
 
         chap_frame = ttk.Frame(right)
         chap_frame.pack(fill=tk.BOTH, expand=True)
@@ -673,6 +629,8 @@ class DownloadApp:
         self.stopping = True
         self.status('正在等待当前任务下载完成并停止...')
         self.download_btn.config(state='disabled')
+        self.retry_btn.config(state='disabled')
+        self.stop_btn.config(state='disabled')
 
     def stop_download(self):
         if not self.downloading:
@@ -863,30 +821,32 @@ class DownloadApp:
     def _start_download(self, start, end):
         self.status('下载范围: 第 %d 章 至 第 %d 章 (并发 %d)' % (start, end, self.max_workers))
         with self.downloading_lock:
-            self.stop_event.clear()
             self.stopping = False
             self.downloading = True
             self.session_id += 1
             sid = self.session_id
         self.download_btn.config(state='disabled')
+        self.retry_btn.config(state='disabled')
+        self.stop_btn.config(state='normal')
         self.download_thread = threading.Thread(target=self.download_range_worker,
                                                 args=(start, end, sid), daemon=True)
         self.download_thread.start()
 
     def _start_download_custom(self, indices):
         with self.downloading_lock:
-            self.stop_event.clear()
             self.stopping = False
             self.downloading = True
             self.session_id += 1
             sid = self.session_id
         self.download_btn.config(state='disabled')
+        self.retry_btn.config(state='disabled')
+        self.stop_btn.config(state='normal')
         self.download_thread = threading.Thread(target=self.download_custom_worker,
                                                 args=(indices, sid), daemon=True)
         self.download_thread.start()
 
     def download_one_chapter(self, chap_num, chap, save_dir, json_path, album_id, sid):
-        if sid != self.session_id or self.stop_event.is_set() or self.stopping:
+        if sid != self.session_id or self.stopping:
             return False, '取消'
         chap_title = chap['title']
         key = str(chap_num)
@@ -920,7 +880,7 @@ class DownloadApp:
         except Exception as e:
             url_err = str(e) or '获取链接失败'
 
-        if sid != self.session_id or self.stop_event.is_set():
+        if sid != self.session_id:
             return False, '取消'
 
         if not audio_url:
@@ -934,13 +894,11 @@ class DownloadApp:
 
         self.status('下载: %s' % chap_title)
         success, err = download_audio(self.client.session, audio_url, filepath,
-                                      status_cb=self.status, stop_event=self.stop_event)
+                                      status_cb=self.status)
         if sid != self.session_id:
             return False, '取消'
 
         if not success:
-            if self.stop_event.is_set() or err == '已取消':
-                return False, '取消'
             status_entry = {'status': '失败', 'err': err or '下载失败'}
             self.status('失败: %s (%s)' % (chap_title, err or '下载失败'))
             self.update_chapter_status(chap_num, '失败')
@@ -971,6 +929,11 @@ class DownloadApp:
                     os.replace(tmp, path)
                 except Exception as e:
                     self.error('保存记录失败: %s' % e)
+                    if os.path.exists(tmp):
+                        try:
+                            os.remove(tmp)
+                        except OSError:
+                            pass
 
     def _prepare_context(self):
         save_root = self.download_folder.get() or os.path.join(APP_DIR, 'tyfm')
@@ -1002,7 +965,7 @@ class DownloadApp:
 
         if self.max_workers == 1:
             for chap_num, chap in pending:
-                if sid != self.session_id or self.stop_event.is_set() or self.stopping:
+                if sid != self.session_id or self.stopping:
                     break
                 self.download_one_chapter(chap_num, chap, save_dir, json_path, album_id, sid)
             return
@@ -1014,7 +977,7 @@ class DownloadApp:
         def submit_next():
             nonlocal pending_index
             while pending_index < len(pending):
-                if self.stop_event.is_set() or sid != self.session_id or self.stopping:
+                if sid != self.session_id or self.stopping:
                     return False
                 chap_num, chap = pending[pending_index]
                 future = executor.submit(self.download_one_chapter, chap_num, chap,
@@ -1029,7 +992,7 @@ class DownloadApp:
                 break
 
         while active or pending_index < len(pending):
-            if self.stop_event.is_set() or sid != self.session_id:
+            if sid != self.session_id:
                 break
             if active:
                 done, _ = wait(list(active.keys()), timeout=0.5, return_when=FIRST_COMPLETED)
@@ -1047,7 +1010,7 @@ class DownloadApp:
                 if not submit_next():
                     break
 
-        if self.stop_event.is_set() or sid != self.session_id:
+        if sid != self.session_id:
             executor.shutdown(wait=False)
         else:
             executor.shutdown(wait=True)
@@ -1099,13 +1062,14 @@ class DownloadApp:
         stopped = self.stopping
         with self.downloading_lock:
             self.downloading = False
-        self.stop_event.clear()
         self.stopping = False
         self.flush_record()
 
         def _restore_ui():
             try:
                 self.download_btn.config(state='normal')
+                self.retry_btn.config(state='normal')
+                self.stop_btn.config(state='normal')
             except tk.TclError:
                 pass
         try:
@@ -1119,6 +1083,13 @@ class DownloadApp:
         if self.close_waiting:
             self.close_waiting = False
             self.destroyed = True
+            try:
+                with self._err_lock:
+                    if self._err_fp:
+                        self._err_fp.close()
+                        self._err_fp = None
+            except Exception:
+                pass
             try:
                 self.root.after(0, self.root.destroy)
             except tk.TclError:
@@ -1153,6 +1124,8 @@ class DownloadApp:
             self.stopping = True
             self.status('正在等待当前任务下载完成并退出...')
             self.download_btn.config(state='disabled')
+            self.retry_btn.config(state='disabled')
+            self.stop_btn.config(state='disabled')
         else:
             try:
                 with self._err_lock:

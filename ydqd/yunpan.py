@@ -487,6 +487,7 @@ class YP:
             self.market_cookies = {}
             self.red_packet_token = ''
             self.red_packet_mobile = ''
+            self.last_v3_task_ids = set()
             self.session = requests.Session()
             self.user_log_lines = []
             self.timestamp = str(int(round(time.time() * 1000)))
@@ -955,6 +956,7 @@ class YP:
         tasks = self.get_task_list_v3(market_name)
         if tasks is None:
             return False
+        self.last_v3_task_ids = {t.get('id') for t in tasks if isinstance(t, dict)}
         self.log(title)
         self.register_task_device()
         self.receive_completed_task_rewards_v3(market_name, tasks)
@@ -1214,36 +1216,49 @@ class YP:
             return True
         return False
     def complete_share_file_task(self, task):
-        share_file = self.create_cloud_file('auto_share_')
-        if not share_file:
-            self.log('分享文件失败: 创建临时文件失败')
-            return None
-        try:
-            response = self.request_json('https://yun.139.com/orchestration/personalCloud-rebuild/outlink/v1.0/getOutLink',
-                                         headers=self.build_share_headers(),
-                                         data={
-                                             'getOutLinkReq': {
-                                                 'subLinkType': 0,
-                                                 'encrypt': 0,
-                                                 'coIDLst': [share_file.get('fileId')],
-                                                 'caIDLst': [],
-                                                 'pubType': 1,
-                                                 'dedicatedName': share_file.get('fileName', ''),
-                                                 'periodUnit': 1,
-                                                 'viewerLst': [],
-                                                 'extInfo': {'isWatermark': 0, 'shareChannel': '3001'},
-                                                 'commonAccountInfo': {'account': self.account, 'accountType': 1},
-                                             }
-                                         },
-                                         method='POST', retries=1)
-        finally:
-            self.trash_cloud_files([share_file.get('fileId')])
-        result = response.get('data', {}).get('result', {}) if response else {}
-        if not response or not response.get('success') or result.get('resultCode') != '0':
-            msg = result.get('resultDesc') or response.get('message', '未知错误') if response else '接口无响应'
-            self.log(f'分享文件失败: {msg}')
-            return None
-        return self.query_task_v3('sign_in_3', task.get('id', 434)) or self.query_cloud_task(task.get('id', 434), 'month') or task
+        task_id = task.get('id', 434)
+        target_count = 7
+        match = re.search(r'/(\d+)', self.strip_task_name(task))
+        if match:
+            target_count = max(1, int(match.group(1)))
+        refreshed = task
+        if int(task.get('process') or 0) >= target_count or task.get('state') == 'FINISH':
+            return task
+        for _ in range(target_count):
+            share_file = self.create_cloud_file('auto_share_')
+            if not share_file:
+                self.log('分享文件失败: 创建临时文件失败')
+                return None
+            try:
+                response = self.request_json('https://yun.139.com/orchestration/personalCloud-rebuild/outlink/v1.0/getOutLink',
+                                             headers=self.build_share_headers(),
+                                             data={
+                                                 'getOutLinkReq': {
+                                                     'subLinkType': 0,
+                                                     'encrypt': 0,
+                                                     'coIDLst': [share_file.get('fileId')],
+                                                     'caIDLst': [],
+                                                     'pubType': 1,
+                                                     'dedicatedName': share_file.get('fileName', ''),
+                                                     'periodUnit': 1,
+                                                     'viewerLst': [],
+                                                     'extInfo': {'isWatermark': 0, 'shareChannel': '3001'},
+                                                     'commonAccountInfo': {'account': self.account, 'accountType': 1},
+                                                 }
+                                             },
+                                             method='POST', retries=1)
+            finally:
+                self.trash_cloud_files([share_file.get('fileId')])
+            result = response.get('data', {}).get('result', {}) if response else {}
+            if not response or not response.get('success') or result.get('resultCode') != '0':
+                msg = result.get('resultDesc') or response.get('message', '未知错误') if response else '接口无响应'
+                self.log(f'分享文件失败: {msg}')
+                return None
+            refreshed = self.query_task_v3('sign_in_3', task_id) or self.query_cloud_task(task_id, 'month') or task
+            if refreshed.get('state') == 'FINISH' or int(refreshed.get('process') or 0) >= target_count:
+                break
+            time.sleep(1)
+        return refreshed
     def build_ai_headers(self, use_client_info=False):
         headers = {
             'Connection': 'keep-alive',
@@ -1444,20 +1459,23 @@ class YP:
         self.log(f'-月上传任务进度: {current_process}/{target_count}')
         return False
     def get_tasklist(self, url, app_type):
-        if url in ('sign_in_3', 'newsign_139mail'):
-            title = '\n📋 云朵中心任务' if app_type == 'cloud_app' else '\n📧 139邮箱任务'
-            if self.run_task_list_v3(url, title + '(V3)'):
-                if app_type == 'cloud_app':
-                    self.claim_revival_reward()
-                    self.claim_multiple_clouds()
-                    self.cleanup_uploaded_files()
-                return
-            if app_type == 'cloud_app':
+        if url == 'sign_in_3' and app_type == 'cloud_app':
+            if self.run_task_list_v3(url, '\n📋 云朵中心任务(V3)'):
+                self.claim_revival_reward()
+                self.claim_multiple_clouds()
+                self.log('\n📋 云朵中心任务(V2 补充)')
+                self.get_cloud_tasklist_v2(with_claims=False, skip_ids=self.last_v3_task_ids)
+                self.cleanup_uploaded_files()
+            else:
                 self.log('V3任务列表不可用，回退V2')
                 self.get_cloud_tasklist_v2()
+            return
+        if url == 'newsign_139mail' and app_type == 'email_app':
+            if self.run_task_list_v3(url, '\n📧 139邮箱任务(V3)'):
                 return
         self.get_tasklist_v2_fallback(url, app_type)
-    def get_cloud_tasklist_v2(self):
+    def get_cloud_tasklist_v2(self, with_claims=True, skip_ids=None):
+        skip_ids = skip_ids or set()
         for group, title in (('cloudEmail', '\n📮 联动任务'), ('time', '\n✨ 新版热门任务'),
                              ('day', '\n📆 云盘每日任务'), ('month', '\n📆 云盘每月任务')):
             return_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/task/taskListV2',
@@ -1477,10 +1495,13 @@ class YP:
                 continue
             self.log(title)
             for task in tasks:
+                if task.get('id') in skip_ids:
+                    continue
                 self.handle_cloud_v2_task(group, task)
-        self.claim_revival_reward()
-        self.claim_multiple_clouds()
-        self.cleanup_uploaded_files()
+        if with_claims:
+            self.claim_revival_reward()
+            self.claim_multiple_clouds()
+            self.cleanup_uploaded_files()
     def handle_cloud_v2_task(self, group, task):
         task_id = task.get('id')
         task_name = self.strip_task_name(task)
@@ -2015,14 +2036,24 @@ class YP:
     @catch_errors
     def click(self):
         successful_click = 0
+        last_msg = ''
         for _ in range(self.click_num):
             return_data = self.click_task(319) or {}
             time.sleep(0.2)
             if 'result' in return_data:
-                self.log(f'✅戳一戳: {return_data["result"]}')
-                successful_click += 1
+                text = str(return_data.get('result') or '').strip()
+                if text:
+                    self.log(f'✅戳一戳: {text}')
+                    successful_click += 1
+                continue
+            msg = str(return_data.get('msg') or return_data.get('message') or '').strip()
+            if msg:
+                last_msg = msg
         if successful_click == 0:
-            self.log(f'❌戳一戳: 未获得 x {self.click_num}')
+            if last_msg:
+                self.log(f'❌戳一戳: 未获得（{last_msg}）')
+            else:
+                self.log('❌戳一戳: 本次无奖励（今日次数可能已用完/任务已完成）')
     @catch_errors
     def wxsign(self):
         self.sleep()
@@ -2042,16 +2073,32 @@ class YP:
         self.log('✅公众号签到成功')
     @catch_errors
     def shake(self):
-        url = "https://caiyun.feixin.10086.cn:7071/market/shake-server/shake/shakeIt?flag=1"
+        candidates = [
+            ('https://caiyun.feixin.10086.cn:7071/market/shake-server/shake/shakeIt?flag=1',
+             'caiyun.feixin.10086.cn:7071'),
+            ('https://caiyun.feixin.10086.cn/market/shake-server/shake/shakeIt?flag=1',
+             'caiyun.feixin.10086.cn'),
+        ]
+        index = 0
+        url, host = candidates[index]
         successful_shakes = 0
         failed_times = 0
+        aborted = False
         for _ in range(self.click_num):
-            return_data = self.request_json(url=url, cookies=self.cookies, headers=self.jwtHeaders,
+            headers = dict(self.jwtHeaders)
+            headers['Host'] = host
+            return_data = self.request_json(url=url, cookies=self.cookies, headers=headers,
                                             method='POST', retries=1)
             if not return_data:
                 failed_times += 1
                 if failed_times >= 3:
-                    self.log('❌摇一摇: 服务暂不可用，跳过剩余次数')
+                    if index + 1 < len(candidates):
+                        index += 1
+                        url, host = candidates[index]
+                        failed_times = 0
+                        self.log(f'-摇一摇: 7071 线路不可用，切换备用线路')
+                        continue
+                    aborted = True
                     break
                 time.sleep(2)
                 continue
@@ -2063,7 +2110,10 @@ class YP:
                 successful_shakes += 1
             time.sleep(1)
         if successful_shakes == 0:
-            self.log(f'❌未摇中 x {self.click_num}')
+            if aborted:
+                self.log('❌摇一摇: 接口持续 502，今日跳过')
+            else:
+                self.log(f'❌未摇中 x {self.click_num}')
     @catch_errors
     def surplus_num(self):
         self.sleep()
@@ -2082,12 +2132,13 @@ class YP:
             return
         for _ in range(self.draw):
             self.sleep()
-            draw_data = self.request_json(url=draw_url, headers=self.jwtHeaders, retries=2)
+            draw_data = self.request_json(url=draw_url, headers=self.jwtHeaders, cookies=self.cookies, retries=2)
             if draw_data and draw_data.get('code') == 0:
                 prize_name = (draw_data.get('result') or {}).get('prizeName', '')
                 self.log(f'✅抽奖成功，获得:{prize_name}')
             else:
-                self.log('❌抽奖失败')
+                msg = (draw_data.get('msg') or draw_data.get('message') or '未知错误') if draw_data else '接口无响应'
+                self.log(f'❌抽奖失败: {msg}')
     def login_red_packet(self):
         token = self.query_spec_token(RED_PACKET_SOURCE_ID)
         if not token:
@@ -2098,6 +2149,8 @@ class YP:
             'User-Agent': ua,
             'Accept': '*/*',
             'Host': 'cpactiv.buy.139.com',
+            'Origin': 'https://cpactiv.buy.139.com',
+            'Referer': RED_PACKET_PAGE_URL,
         }
         try:
             resp = requests.post(login_url, headers=login_headers,

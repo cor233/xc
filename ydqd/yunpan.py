@@ -739,7 +739,7 @@ class YP:
         for attempt in range(retries):
             try:
                 response = self.session.request(method, url, params=params, headers=request_headers or None,
-                                                cookies=request_cookies or None, **request_args)
+                                                cookies=request_cookies or None, timeout=20, **request_args)
                 if 400 <= response.status_code < 500:
                     if debug:
                         print(f'\n【{url}】响应状态码: {response.status_code}')
@@ -892,10 +892,11 @@ class YP:
         return True
     def click_task(self, task_id, key='task'):
         return self.request_market_json(f'{self.market_base_url}/ycloud/signin/task/click?key={key}&id={task_id}')
-    def get_task_list_v3(self, market_name='sign_in_3'):
+    def get_task_list_v3(self, market_name='sign_in_3', prepare=True):
         if market_name not in ('sign_in_3', 'newsign_139mail'):
             return None
-        self.prepare_signin_center_session(False)
+        if prepare:
+            self.prepare_signin_center_session(False)
         data = self.request_market_json(
             f'{self.market_base_url}/ycloud/signin/task/taskListV3',
             json_body=True, method='POST',
@@ -906,7 +907,7 @@ class YP:
             return None
         return data['result']
     def query_task_v3(self, market_name, task_id):
-        tasks = self.get_task_list_v3(market_name)
+        tasks = self.get_task_list_v3(market_name, prepare=False)
         if not tasks:
             return None
         for task in tasks:
@@ -937,7 +938,7 @@ class YP:
                                         params={'taskId': task_id})
     def receive_completed_task_rewards_v3(self, market_name, tasks=None):
         if tasks is None:
-            tasks = self.get_task_list_v3(market_name) or []
+            tasks = self.get_task_list_v3(market_name, prepare=False) or []
         for task in tasks:
             if not isinstance(task, dict):
                 continue
@@ -967,7 +968,7 @@ class YP:
                 self.handle_v3_task(market_name, task)
             except Exception as e:
                 self.log(f'-任务处理异常: {self.strip_task_name(task)} {e}')
-            time.sleep(0.5)
+            time.sleep(0.2)
         self.receive_completed_task_rewards_v3(market_name)
         return True
     def handle_v3_task(self, market_name, task):
@@ -1021,7 +1022,7 @@ class YP:
                     self.log(f"-任务登记返回异常: {post.get('msg', '未知错误')}")
                 if rnd + 1 >= max_rounds:
                     break
-                time.sleep(1.5)
+                time.sleep(0.8)
                 refreshed = self.query_task_v3(market_name, task_id)
                 if not refreshed or refreshed.get('state') == 'FINISH':
                     break
@@ -1224,6 +1225,8 @@ class YP:
         refreshed = task
         if int(task.get('process') or 0) >= target_count or task.get('state') == 'FINISH':
             return task
+        current_process = int(task.get('process') or 0)
+        unchanged = 0
         for _ in range(target_count):
             share_file = self.create_cloud_file('auto_share_')
             if not share_file:
@@ -1255,9 +1258,17 @@ class YP:
                 self.log(f'分享文件失败: {msg}')
                 return None
             refreshed = self.query_task_v3('sign_in_3', task_id) or self.query_cloud_task(task_id, 'month') or task
-            if refreshed.get('state') == 'FINISH' or int(refreshed.get('process') or 0) >= target_count:
+            process = int(refreshed.get('process') or 0)
+            if refreshed.get('state') == 'FINISH' or process >= target_count:
                 break
-            time.sleep(1)
+            if process <= current_process:
+                unchanged += 1
+                if unchanged >= 2:
+                    break
+            else:
+                unchanged = 0
+            current_process = process
+            time.sleep(0.3)
         return refreshed
     def build_ai_headers(self, use_client_info=False):
         headers = {
@@ -1445,7 +1456,8 @@ class YP:
             else:
                 self.log(f'-继续补上传进度: 当前{current_process}/{target_count}，还需{remaining}次')
             for _ in range(remaining):
-                self.updata_file()
+                self.updata_file(cleanup=False)
+            self.cleanup_uploaded_files()
             refreshed_task = self.query_task_v3('sign_in_3', task.get('id', 522)) or self.query_cloud_task(task.get('id', 522), 'time')
             if not refreshed_task:
                 return False
@@ -1836,13 +1848,14 @@ class YP:
             elif task_id == 107:
                 self.do_note_task()
     @catch_errors
-    def updata_file(self):
+    def updata_file(self, cleanup=True):
         upload_info = self.create_cloud_file('auto_upload_')
         if not upload_info:
             self.log('-上传失败: 接口无响应')
             return False
         self.log(f"-上传文件成功，文件名: {upload_info.get('fileName', '')}")
-        self.cleanup_uploaded_files(upload_info)
+        if cleanup:
+            self.cleanup_uploaded_files(upload_info)
         return True
     def create_note(self, headers):
         note_id = self.get_note_id(32)
@@ -1942,7 +1955,7 @@ class YP:
             else:
                 msg = ack.get('msg', '未知错误') if ack else '接口无响应'
                 self.log(f'-领取云朵失败: {msg}')
-            time.sleep(0.5)
+            time.sleep(0.2)
         if received_amount:
             self.log(f'-领取云朵:{received_amount}云朵')
         elif pending_amount:
@@ -2100,7 +2113,7 @@ class YP:
                         continue
                     aborted = True
                     break
-                time.sleep(2)
+                time.sleep(1)
                 continue
             failed_times = 0
             result = return_data.get('result') or {}
@@ -2108,7 +2121,7 @@ class YP:
             if prize:
                 self.log(f"🎉摇一摇获得: {prize.get('name', '')}")
                 successful_shakes += 1
-            time.sleep(1)
+            time.sleep(0.5)
         if successful_shakes == 0:
             if aborted:
                 self.log('❌摇一摇: 接口持续 502，今日跳过')

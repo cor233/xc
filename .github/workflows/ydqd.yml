@@ -27,6 +27,7 @@ jobs:
         env:
           yunpan: ${{ secrets.YUNPAN_TOKEN }}
           yunpan_device_id: ${{ secrets.YUNPAN_DEVICE_ID }}
+          yunpan_skip: 'none'
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python yunpan.py

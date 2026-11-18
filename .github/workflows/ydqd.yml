@@ -2,7 +2,7 @@ name: 移动云盘自动签到
 
 on:
   schedule:
-    - cron: '20 0 * * *'
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 jobs:
@@ -21,7 +21,7 @@ jobs:
           python-version: '3.10'
 
       - name: 安装依赖
-        run: pip install -r requirements.txt
+        run: pip3 install requests pycryptodome
 
       - name: 执行签到
         env:

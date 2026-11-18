@@ -488,6 +488,7 @@ class YP:
             self.red_packet_token = ''
             self.red_packet_mobile = ''
             self.last_v3_task_ids = set()
+            self.last_v3_task_names = set()
             self.session = requests.Session()
             self.user_log_lines = []
             self.timestamp = str(int(round(time.time() * 1000)))
@@ -703,20 +704,30 @@ class YP:
     def run(self):
         self.log(f'账号: {self.encrypt_account}')
         if self.jwt():
+            skip_env = os.getenv('yunpan_skip')
+            if skip_env is None:
+                skip = {'shake'}
+            else:
+                skip = {x.strip().lower() for x in skip_env.split(',')
+                        if x.strip() and x.strip().lower() != 'none'}
             self.refresh_authorization_token()
             self.signin_status()
             self.click()
             self.get_tasklist(url='sign_in_3', app_type='cloud_app')
-            self.log(f'\n📰 公众号任务')
-            self.wxsign()
-            self.shake()
-            self.surplus_num()
+            if 'wxsign' not in skip:
+                self.log(f'\n📰 公众号任务')
+                self.wxsign()
+            if 'shake' not in skip:
+                self.shake()
+            if 'draw' not in skip:
+                self.surplus_num()
             self.log(f'\n🔥 热门任务')
             self.backup_cloud()
             self.complete_notice_task()
             self.get_tasklist(url='newsign_139mail', app_type='email_app')
             self.receive()
-            self.red_envelope_party()
+            if 'redpacket' not in skip:
+                self.red_envelope_party()
             self.sync_token_storage()
             global all_logs
             user_log_str = "\n".join(self.user_log_lines)
@@ -726,7 +737,7 @@ class YP:
             err_accounts += f'{self.encrypt_account}\n'
     @catch_errors
     def send_request(self, url, headers=None, cookies=None, data=None, json_data=None, params=None, method='GET', debug=None,
-                     retries=5):
+                     retries=5, timeout=20):
         debug = debug if debug is not None else GLOBAL_DEBUG
         request_headers = dict(headers or {})
         request_cookies = dict(cookies or {})
@@ -739,7 +750,7 @@ class YP:
         for attempt in range(retries):
             try:
                 response = self.session.request(method, url, params=params, headers=request_headers or None,
-                                                cookies=request_cookies or None, timeout=20, **request_args)
+                                                cookies=request_cookies or None, timeout=timeout, **request_args)
                 if 400 <= response.status_code < 500:
                     if debug:
                         print(f'\n【{url}】响应状态码: {response.status_code}')
@@ -765,9 +776,9 @@ class YP:
                     return None
                 time.sleep(1)
     def request_json(self, url, headers=None, cookies=None, data=None, json_data=None, params=None, method='GET', debug=None,
-                     retries=5):
+                     retries=5, timeout=20):
         response = self.send_request(url, headers=headers, cookies=cookies, data=data, json_data=json_data,
-                                     params=params, method=method, debug=debug, retries=retries)
+                                     params=params, method=method, debug=debug, retries=retries, timeout=timeout)
         if response is None:
             return None
         try:
@@ -957,7 +968,8 @@ class YP:
         tasks = self.get_task_list_v3(market_name)
         if tasks is None:
             return False
-        self.last_v3_task_ids = {t.get('id') for t in tasks if isinstance(t, dict)}
+        self.last_v3_task_ids = {str(t.get('id')) for t in tasks if isinstance(t, dict) and t.get('id') is not None}
+        self.last_v3_task_names = {self.strip_task_name(t) for t in tasks if isinstance(t, dict)}
         self.log(title)
         self.register_task_device()
         self.receive_completed_task_rewards_v3(market_name, tasks)
@@ -1476,7 +1488,8 @@ class YP:
                 self.claim_revival_reward()
                 self.claim_multiple_clouds()
                 self.log('\n📋 云朵中心任务(V2 补充)')
-                self.get_cloud_tasklist_v2(with_claims=False, skip_ids=self.last_v3_task_ids)
+                self.get_cloud_tasklist_v2(with_claims=False, skip_ids=self.last_v3_task_ids,
+                                           skip_names=self.last_v3_task_names)
                 self.cleanup_uploaded_files()
             else:
                 self.log('V3任务列表不可用，回退V2')
@@ -1486,8 +1499,9 @@ class YP:
             if self.run_task_list_v3(url, '\n📧 139邮箱任务(V3)'):
                 return
         self.get_tasklist_v2_fallback(url, app_type)
-    def get_cloud_tasklist_v2(self, with_claims=True, skip_ids=None):
-        skip_ids = skip_ids or set()
+    def get_cloud_tasklist_v2(self, with_claims=True, skip_ids=None, skip_names=None):
+        skip_ids = {str(i) for i in (skip_ids or set())}
+        skip_names = skip_names or set()
         for group, title in (('cloudEmail', '\n📮 联动任务'), ('time', '\n✨ 新版热门任务'),
                              ('day', '\n📆 云盘每日任务'), ('month', '\n📆 云盘每月任务')):
             return_data = self.request_market_json(f'{self.market_base_url}/ycloud/signin/task/taskListV2',
@@ -1507,7 +1521,7 @@ class YP:
                 continue
             self.log(title)
             for task in tasks:
-                if task.get('id') in skip_ids:
+                if str(task.get('id')) in skip_ids or self.strip_task_name(task) in skip_names:
                     continue
                 self.handle_cloud_v2_task(group, task)
         if with_claims:
@@ -2060,7 +2074,7 @@ class YP:
                     successful_click += 1
                 continue
             msg = str(return_data.get('msg') or return_data.get('message') or '').strip()
-            if msg:
+            if msg and msg.lower() != 'success':
                 last_msg = msg
         if successful_click == 0:
             if last_msg:
@@ -2101,19 +2115,18 @@ class YP:
             headers = dict(self.jwtHeaders)
             headers['Host'] = host
             return_data = self.request_json(url=url, cookies=self.cookies, headers=headers,
-                                            method='POST', retries=1)
+                                            method='POST', retries=1, timeout=6)
             if not return_data:
                 failed_times += 1
-                if failed_times >= 3:
+                if failed_times >= 2:
                     if index + 1 < len(candidates):
                         index += 1
                         url, host = candidates[index]
                         failed_times = 0
-                        self.log(f'-摇一摇: 7071 线路不可用，切换备用线路')
+                        self.log('-摇一摇: 7071 线路超时/不可用，切换备用线路')
                         continue
                     aborted = True
                     break
-                time.sleep(1)
                 continue
             failed_times = 0
             result = return_data.get('result') or {}
@@ -2124,7 +2137,7 @@ class YP:
             time.sleep(0.5)
         if successful_shakes == 0:
             if aborted:
-                self.log('❌摇一摇: 接口持续 502，今日跳过')
+                self.log('❌摇一摇: 接口超时/502，今日跳过')
             else:
                 self.log(f'❌未摇中 x {self.click_num}')
     @catch_errors
